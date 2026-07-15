@@ -13,12 +13,13 @@ class Settings(BaseSettings):
     environment: str = "development"
     database_url: str = "sqlite+pysqlite:///./storage/revia.db"
     file_storage_root: str = "./storage"
-    storage_backend: Literal["local", "r2"] = "local"
-    r2_account_id: str = ""
-    r2_access_key_id: str = ""
-    r2_secret_access_key: str = ""
-    r2_bucket_name: str = ""
-    r2_endpoint: str = ""
+    storage_backend: Literal["local", "s3"] = "local"
+    s3_endpoint: str = ""
+    s3_region: str = "auto"
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
+    s3_bucket_name: str = ""
+    s3_force_path_style: bool = False
     upload_url_expires_seconds: int = 900
     document_lease_seconds: int = 300
     cors_origins: Annotated[list[str], NoDecode] = [
@@ -27,6 +28,7 @@ class Settings(BaseSettings):
         "http://[::1]:3000",
     ]
     app_access_code: str = "revia-local"
+    public_access_enabled: bool = False
     session_signing_key: str = "revia-local-session-signing-key-change-me"
     credential_encryption_key: str = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
     ai_mode: Literal["mock", "live"] = "mock"
@@ -42,7 +44,11 @@ class Settings(BaseSettings):
     ocr_dpi: int = 144
     ocr_minimum_text_length: int = 8
     max_upload_mb: int = 150
-    max_pdf_pages: int = 500
+    max_pdf_pages: int = 600
+    workspace_max_active_documents: int = 1
+    workspace_rolling_24h_page_limit: int = 1200
+    global_max_processing_documents: int = 1
+    global_rolling_24h_page_limit: int = 3000
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -85,6 +91,13 @@ class Settings(BaseSettings):
             raise ValueError("CREDENTIAL_ENCRYPTION_KEY must be a valid Fernet key") from exc
         if self.max_upload_mb <= 0 or self.max_pdf_pages <= 0:
             raise ValueError("Upload limits must be positive integers")
+        if min(
+            self.workspace_max_active_documents,
+            self.workspace_rolling_24h_page_limit,
+            self.global_max_processing_documents,
+            self.global_rolling_24h_page_limit,
+        ) <= 0:
+            raise ValueError("Document quota limits must be positive integers")
         if self.upload_url_expires_seconds <= 0 or self.document_lease_seconds <= 0:
             raise ValueError("Upload URL and document lease durations must be positive")
         if self.environment.casefold() == "production":
@@ -108,18 +121,18 @@ class Settings(BaseSettings):
                 raise ValueError("Production access and signing secrets must be explicitly configured")
             if self.credential_encryption_key == "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=":
                 raise ValueError("Production CREDENTIAL_ENCRYPTION_KEY must be explicitly configured")
-            if self.storage_backend != "r2":
-                raise ValueError("Production STORAGE_BACKEND must be r2")
-            r2_required = {
-                "R2_ACCOUNT_ID": self.r2_account_id,
-                "R2_ACCESS_KEY_ID": self.r2_access_key_id,
-                "R2_SECRET_ACCESS_KEY": self.r2_secret_access_key,
-                "R2_BUCKET_NAME": self.r2_bucket_name,
-                "R2_ENDPOINT": self.r2_endpoint,
+            if self.storage_backend != "s3":
+                raise ValueError("Production STORAGE_BACKEND must be s3")
+            s3_required = {
+                "S3_ENDPOINT": self.s3_endpoint,
+                "S3_REGION": self.s3_region,
+                "S3_ACCESS_KEY_ID": self.s3_access_key_id,
+                "S3_SECRET_ACCESS_KEY": self.s3_secret_access_key,
+                "S3_BUCKET_NAME": self.s3_bucket_name,
             }
-            r2_missing = [name for name, value in r2_required.items() if not value]
-            if r2_missing:
-                raise ValueError(f"Production R2 configuration is missing: {', '.join(r2_missing)}")
+            s3_missing = [name for name, value in s3_required.items() if not value]
+            if s3_missing:
+                raise ValueError(f"Production S3 configuration is missing: {', '.join(s3_missing)}")
         return self
 
 

@@ -8,6 +8,11 @@ class ProjectStatus(StrEnum):
     FAILED = "failed"
 
 
+class WorkspaceRole(StrEnum):
+    OWNER = "owner"
+    PUBLIC = "public"
+
+
 class DocumentKind(StrEnum):
     COURSE_MATERIAL = "course_material"
     SYLLABUS = "syllabus"

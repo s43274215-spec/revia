@@ -1,7 +1,7 @@
 from app.models.content import BulletPoint, BulletPointSource, Chapter, ContentVersion, KnowledgePoint
 from app.models.document import DocumentPage, ParsedDocument, ParsedPage, TextChunk
 from app.models.project import Document, GenerationJob, Project, Syllabus
-from app.models.workspace import DeepSeekCredential, Workspace
+from app.models.workspace import DeepSeekCredential, QuotaGuard, SiteSettings, Workspace
 
 __all__ = [
     "Project",
@@ -19,4 +19,6 @@ __all__ = [
     "TextChunk",
     "Workspace",
     "DeepSeekCredential",
+    "QuotaGuard",
+    "SiteSettings",
 ]

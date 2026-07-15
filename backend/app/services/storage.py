@@ -206,8 +206,8 @@ class LocalStorageProvider:
         return None
 
 
-class R2StorageProvider:
-    backend_name = "r2"
+class S3StorageProvider:
+    backend_name = "s3"
 
     def __init__(
         self,
@@ -216,20 +216,26 @@ class R2StorageProvider:
         access_key_id: str,
         secret_access_key: str,
         bucket_name: str,
+        region: str,
+        force_path_style: bool,
         temp_root: Path,
     ) -> None:
         try:
             import boto3
             from botocore.config import Config
         except ImportError as exc:
-            raise StorageError("R2 存储依赖未安装") from exc
+            raise StorageError("S3 兼容对象存储依赖未安装") from exc
         self._client = boto3.client(
             "s3",
             endpoint_url=endpoint,
             aws_access_key_id=access_key_id,
             aws_secret_access_key=secret_access_key,
-            region_name="auto",
-            config=Config(signature_version="s3v4", retries={"max_attempts": 3, "mode": "standard"}),
+            region_name=region,
+            config=Config(
+                signature_version="s3v4",
+                retries={"max_attempts": 3, "mode": "standard"},
+                s3={"addressing_style": "path" if force_path_style else "virtual"},
+            ),
         )
         self._bucket = bucket_name
         self._temp_root = temp_root.resolve()
@@ -270,7 +276,7 @@ class R2StorageProvider:
             path.unlink(missing_ok=True)
             if self._is_not_found(exc):
                 raise StorageError("原始 PDF 已不存在，无法继续解析") from exc
-            raise StorageError("无法从 R2 下载 PDF") from exc
+            raise StorageError("无法从对象存储下载 PDF") from exc
 
     def delete_object(self, object_key: str) -> None:
         self._client.delete_object(Bucket=self._bucket, Key=object_key)
@@ -282,7 +288,7 @@ class R2StorageProvider:
         except Exception as exc:
             if self._is_not_found(exc):
                 return False
-            raise StorageError("无法检查 R2 对象") from exc
+            raise StorageError("无法检查对象存储文件") from exc
 
     def object_size(self, object_key: str) -> int:
         try:
@@ -291,7 +297,7 @@ class R2StorageProvider:
         except Exception as exc:
             if self._is_not_found(exc):
                 raise StorageError("原始 PDF 已不存在") from exc
-            raise StorageError("无法读取 R2 对象信息") from exc
+            raise StorageError("无法读取对象存储文件信息") from exc
 
     def release_temp(self, path: Path) -> None:
         path.unlink(missing_ok=True)
@@ -311,12 +317,14 @@ def build_storage_provider(settings: object) -> StorageProvider:
             max_upload_bytes=int(getattr(settings, "max_upload_mb")) * 1024 * 1024,
             signing_key=str(getattr(settings, "session_signing_key")),
         )
-    if backend == "r2":
-        return R2StorageProvider(
-            endpoint=str(getattr(settings, "r2_endpoint")),
-            access_key_id=str(getattr(settings, "r2_access_key_id")),
-            secret_access_key=str(getattr(settings, "r2_secret_access_key")),
-            bucket_name=str(getattr(settings, "r2_bucket_name")),
+    if backend == "s3":
+        return S3StorageProvider(
+            endpoint=str(getattr(settings, "s3_endpoint")),
+            region=str(getattr(settings, "s3_region")),
+            access_key_id=str(getattr(settings, "s3_access_key_id")),
+            secret_access_key=str(getattr(settings, "s3_secret_access_key")),
+            bucket_name=str(getattr(settings, "s3_bucket_name")),
+            force_path_style=bool(getattr(settings, "s3_force_path_style")),
             temp_root=Path(str(getattr(settings, "file_storage_root"))),
         )
     raise StorageError(f"不支持的 STORAGE_BACKEND：{backend}")

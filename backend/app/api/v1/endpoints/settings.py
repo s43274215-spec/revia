@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.auth.dependencies import WorkspaceId
+from app.auth.dependencies import OwnerWorkspace, WorkspaceId
 from app.core.config import Settings, get_settings
 from app.db.session import get_db
 from app.settings.schemas import (
@@ -12,10 +12,13 @@ from app.settings.schemas import (
     DeepSeekConnectionTestRequest,
     DeepSeekSettingsResult,
     EncryptedAPIKeyWrite,
+    SiteSettingsRead,
+    SiteSettingsUpdate,
     TransportPublicKeyRead,
 )
 from app.settings.security import CredentialCipher, SecretStorageError, SecretTransportError, get_transport_key_pair
 from app.settings.service import DeepSeekSettingsService
+from app.settings.site_service import SiteSettingsService
 
 router = APIRouter()
 
@@ -62,3 +65,27 @@ async def test_deepseek_connection(
     service: SettingsService,
 ) -> DeepSeekConnectionResult:
     return await service.test_connection(payload.encrypted_api_key)
+
+
+@router.get("/site", response_model=SiteSettingsRead)
+def get_site_settings(
+    owner: OwnerWorkspace,
+    db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> SiteSettingsRead:
+    site = SiteSettingsService(db, settings).get()
+    return SiteSettingsRead(public_access_enabled=site.public_access_enabled, updated_at=site.updated_at)
+
+
+@router.put("/site", response_model=SiteSettingsRead)
+def update_site_settings(
+    payload: SiteSettingsUpdate,
+    owner: OwnerWorkspace,
+    db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> SiteSettingsRead:
+    site = SiteSettingsService(db, settings).update(
+        public_access_enabled=payload.public_access_enabled,
+        updated_by=owner,
+    )
+    return SiteSettingsRead(public_access_enabled=site.public_access_enabled, updated_at=site.updated_at)

@@ -309,6 +309,7 @@ class GenerationPipelineAPITests(unittest.TestCase):
             ai_mode="mock",
             matching_threshold=0.35,
             matching_max_candidates=2,
+            public_access_enabled=True,
         )
         self.client = TestClient(app)
         self.client.headers.update(authorization_header(self.workspace_id))
@@ -406,6 +407,7 @@ class GenerationPipelineAPITests(unittest.TestCase):
             file_storage_root=self.storage.name,
             ai_mode="live",
             ai_provider="deepseek",
+            public_access_enabled=True,
         )
         response = self.client.post(f"/api/v1/projects/{self.project_id}/generation-jobs")
         self.assertEqual(response.status_code, 503, response.text)

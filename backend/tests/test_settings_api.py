@@ -47,7 +47,7 @@ def encrypt_for_transport(public_key_pem: str, secret: str) -> str:
 
 class DeepSeekSettingsAPITests(unittest.TestCase):
     def setUp(self) -> None:
-        self.settings = Settings(_env_file=None)
+        self.settings = Settings(_env_file=None, public_access_enabled=True)
         self.engine = create_engine(
             "sqlite+pysqlite:///:memory:",
             connect_args={"check_same_thread": False},

@@ -35,6 +35,7 @@ class DocumentPageRead(BaseModel):
 
 class DocumentProgressRead(DocumentRead):
     is_resuming: bool = False
+    queue_position: int | None = None
 
 
 class ParsedPageRead(BaseModel):

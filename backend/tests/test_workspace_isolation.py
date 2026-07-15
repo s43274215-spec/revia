@@ -51,6 +51,7 @@ class WorkspaceIsolationAPITests(unittest.TestCase):
             _env_file=None,
             database_url="sqlite+pysqlite:///:memory:",
             ai_mode="mock",
+            public_access_enabled=True,
         )
         self.client = TestClient(app)
         self.other_headers = authorization_header(self.other_id)

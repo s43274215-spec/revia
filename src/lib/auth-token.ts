@@ -1,5 +1,6 @@
 const TOKEN_KEY = "revia-workspace-token-v1";
 export const AUTH_REQUIRED_EVENT = "revia-auth-required";
+export const PUBLIC_ACCESS_CLOSED_EVENT = "revia-public-access-closed";
 
 export function getWorkspaceToken(): string | null {
   if (typeof window === "undefined") return null;
@@ -18,4 +19,8 @@ export function clearWorkspaceToken(): void {
 export function requireAuthentication(): void {
   clearWorkspaceToken();
   window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT));
+}
+
+export function notifyPublicAccessClosed(): void {
+  window.dispatchEvent(new Event(PUBLIC_ACCESS_CLOSED_EVENT));
 }

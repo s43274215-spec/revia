@@ -20,6 +20,7 @@ import {
 } from "@/lib/revia-api";
 import { FileDropZone, SelectedPDF } from "./file-drop-zone";
 import { SettingsTrigger } from "@/components/settings/settings-trigger";
+import { useAuth } from "@/components/auth/auth-provider";
 
 const terminalStatuses = new Set<GenerationStatus>(["completed", "partial_failed", "failed"]);
 const progressLabels: Record<GenerationStatus, string> = {
@@ -42,6 +43,7 @@ function conciseSyllabusItem(value: string) {
 }
 
 export function ProjectUploadPage({ projectId }: { projectId: string }) {
+  const { role } = useAuth();
   const router = useRouter();
   const [project, setProject] = useState<BackendProject | null>(null);
   const [loadingProject, setLoadingProject] = useState(true);
@@ -199,6 +201,10 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
 
   const statusLabel = uploadStage === "uploading"
     ? "正在上传完整 PDF"
+    : documentProgress?.processing_status === "queued"
+      ? role === "owner"
+        ? "站长任务 · 已进入优先队列"
+        : `排队中${documentProgress.queue_position ? `（当前第 ${documentProgress.queue_position} 位）` : ""}`
     : documentProgress?.processing_phase === "structuring"
       ? "正在整理内容结构"
       : documentProgress?.is_resuming
@@ -228,7 +234,11 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
         <button className="back-link" onClick={() => router.push("/")}>← 返回项目列表</button>
         <div className="upload-heading"><span className="entry-eyebrow">准备学习资料</span><h1>{project.name}</h1><p>上传课程资料并填写考纲，Revia 将据此生成结构化复习材料。</p></div>
         <div className="upload-section">
-          <div className="upload-section-label"><span>01</span><div><h2>上传课程资料</h2><p>上传单个完整 PDF，最多 150MB；生产环境最多解析 500 页。</p></div></div>
+          <div className="upload-section-label"><span>01</span><div><h2>上传课程资料</h2><p>单个完整 PDF 最多 150MB、600 页，无需拆分；系统会按章节与内容结构自动解析。</p></div></div>
+          <p className="upload-limit-note">{role === "owner"
+            ? "站长工作区每次只能有一份资料排队或处理中，不受最近 24 小时页数额度限制。"
+            : "每次只能有一份资料排队或处理中；最近 24 小时最多累计处理 1200 页。"}</p>
+          {role === "owner" && <p className="owner-task-note">站长任务 · 提交后进入优先队列</p>}
           <FileDropZone title="拖拽完整课程资料到这里" hint="或点击选择文件，仅支持单个 PDF" kind="course_material" files={courseFiles} onFiles={setCourseFiles} />
         </div>
         <div className="upload-section">

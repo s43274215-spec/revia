@@ -9,6 +9,7 @@ from sqlalchemy.pool import StaticPool
 import app.models  # noqa: F401
 from app.db.base import Base
 from app.db.session import get_db
+from app.core.config import Settings, get_settings
 from app.main import app
 from app.models.workspace import Workspace
 from tests.helpers import authorization_header
@@ -33,6 +34,7 @@ class ProjectAPITests(unittest.TestCase):
                 yield session
 
         app.dependency_overrides[get_db] = override_db
+        app.dependency_overrides[get_settings] = lambda: Settings(_env_file=None, public_access_enabled=True)
         self.client = TestClient(app)
         self.client.headers.update(authorization_header(self.workspace_id))
 

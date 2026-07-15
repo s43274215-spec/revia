@@ -45,6 +45,7 @@ class DocumentRead(BaseModel):
     current_page: int
     processing_phase: str
     retry_count: int
+    queue_priority: int
     error_message: str | None
     created_at: datetime
 

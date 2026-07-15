@@ -26,7 +26,7 @@ from app.models.workspace import Workspace
 from app.services.document_processing import DocumentProcessingError, DocumentProcessingService
 from app.services.storage import (
     LocalStorageProvider,
-    R2StorageProvider,
+    S3StorageProvider,
     UploadAuthorizationError,
     UploadURLSigner,
     build_object_key,
@@ -39,7 +39,7 @@ class FakeS3Client:
         self.deleted: list[str] = []
 
     def generate_presigned_url(self, operation: str, *, Params: dict, ExpiresIn: int) -> str:
-        return f"https://private-r2.example/{Params['Key']}?expires={ExpiresIn}"
+        return f"https://private-s3.example/{Params['Key']}?expires={ExpiresIn}"
 
     def download_fileobj(self, bucket: str, key: str, target) -> None:
         target.write(self.objects[key])
@@ -203,12 +203,12 @@ class LongPDFResumeTests(unittest.TestCase):
             self.assertEqual(len(list(restarted_db.scalars(select(DocumentPage)).all())), 200)
             self.assertEqual(len(list(restarted_db.scalars(select(TextChunk)).all())), 1)
 
-    def test_mock_ocr_handles_500_pages_without_rendering_images(self) -> None:
-        document_id = self._document(500)
+    def test_mock_ocr_handles_600_pages_without_rendering_images(self) -> None:
+        document_id = self._document(600)
         with self.Session() as db:
-            document = self._service(db, max_pages=500, parser=MockOCRParser(max_pages=500)).process_document(document_id)
-            self.assertEqual(document.processed_pages, 500)
-            self.assertEqual(document.ocr_page_count, 500)
+            document = self._service(db, max_pages=600, parser=MockOCRParser(max_pages=600)).process_document(document_id)
+            self.assertEqual(document.processed_pages, 600)
+            self.assertEqual(document.ocr_page_count, 600)
             methods = set(db.scalars(
                 select(DocumentPage.extraction_method).where(DocumentPage.document_id == document_id)
             ).all())
@@ -251,41 +251,41 @@ class LongPDFResumeTests(unittest.TestCase):
         with self.assertRaisesRegex(UploadAuthorizationError, "已过期"):
             signer.verify(token)
 
-    def test_r2_presigned_target_and_successful_parse_delete_private_object(self) -> None:
+    def test_s3_presigned_target_and_successful_parse_delete_private_object(self) -> None:
         document_id = uuid.uuid4()
         object_key = build_object_key(self.workspace_id, document_id)
         objects = {object_key: build_text_pdf(3)}
         client = FakeS3Client(objects)
-        r2 = R2StorageProvider.__new__(R2StorageProvider)
-        r2._client = client
-        r2._bucket = "private-revia"
-        r2._temp_root = Path(self.storage_directory.name)
-        target = r2.create_upload_url(
+        s3 = S3StorageProvider.__new__(S3StorageProvider)
+        s3._client = client
+        s3._bucket = "private-revia"
+        s3._temp_root = Path(self.storage_directory.name)
+        target = s3.create_upload_url(
             object_key,
             workspace_id=self.workspace_id,
             document_id=document_id,
             content_type="application/pdf",
             expires_in=60,
         )
-        self.assertTrue(target.url.startswith("https://private-r2.example/"))
+        self.assertTrue(target.url.startswith("https://private-s3.example/"))
         with self.Session() as db:
             db.add(Document(
                 id=document_id,
                 project_id=self.project_id,
                 kind=DocumentKind.COURSE_MATERIAL,
-                original_name="r2.pdf",
+                original_name="s3.pdf",
                 mime_type="application/pdf",
                 size_bytes=len(objects[object_key]),
                 storage_key=object_key,
-                storage_backend="r2",
+                storage_backend="s3",
                 processing_status=DocumentProcessingStatus.QUEUED,
                 processing_phase="queued",
             ))
             db.commit()
             service = DocumentProcessingService(
                 db,
-                r2,
-                PDFParser(max_pages=500),
+                s3,
+                PDFParser(max_pages=600),
                 TextStructurer(),
                 StructuredTextSplitter(),
                 max_upload_bytes=150 * 1024 * 1024,
