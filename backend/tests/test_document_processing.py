@@ -25,7 +25,7 @@ from app.document.structure import TextStructurer
 from app.document.splitter import StructuredTextSplitter
 from app.document.structure import BlockKind, StructuredText, TextBlock
 from app.main import app
-from app.models.document import ParsedDocument, ParsedPage, TextChunk
+from app.models.document import DocumentPage, ParsedDocument, ParsedPage, TextChunk
 from app.models.project import Document, Project
 from app.models.enums import DocumentKind, DocumentProcessingStatus
 from app.models.workspace import Workspace
@@ -178,7 +178,6 @@ class DocumentUploadAPITests(unittest.TestCase):
         self.assertEqual([page["page_number"] for page in payload["parsed_document"]["pages"]], [1, 2])
         self.assertIn("Externality", payload["parsed_document"]["pages"][0]["text"])
         self.assertGreaterEqual(len(payload["parsed_document"]["chunks"]), 1)
-        self.assertIsNone(payload["document"]["storage_key"])
         self.assertEqual(list(Path(self.storage.name).rglob("*.pdf")), [])
 
         with self.Session() as session:
@@ -196,6 +195,63 @@ class DocumentUploadAPITests(unittest.TestCase):
             "chunk_count": len(payload["parsed_document"]["chunks"]),
         }
         print("PDF_UPLOAD_RESULT=" + json.dumps(result_summary, ensure_ascii=False))
+
+    def test_direct_upload_confirmation_persists_progress_and_deletes_object(self) -> None:
+        pdf = build_test_pdf()
+        created = self.client.post(
+            f"/api/v1/projects/{self.project_id}/documents/uploads",
+            json={
+                "kind": "course_material",
+                "filename": "direct.pdf",
+                "content_type": "application/pdf",
+                "size_bytes": len(pdf),
+            },
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        target = created.json()
+        self.assertNotIn("storage_key", target["document"])
+        uploaded = self.client.put(
+            target["upload_url"],
+            content=pdf,
+            headers=target["headers"],
+        )
+        self.assertEqual(uploaded.status_code, 204, uploaded.text)
+        confirmed = self.client.post(
+            f"/api/v1/projects/{self.project_id}/documents/{target['document']['id']}/confirm"
+        )
+        self.assertEqual(confirmed.status_code, 202, confirmed.text)
+        progress = self.client.get(
+            f"/api/v1/projects/{self.project_id}/documents/{target['document']['id']}"
+        )
+        self.assertEqual(progress.status_code, 200, progress.text)
+        self.assertEqual(progress.json()["processing_status"], "parsed")
+        self.assertEqual(progress.json()["processed_pages"], 2)
+        with self.Session() as session:
+            self.assertEqual(len(session.scalars(select(DocumentPage)).all()), 2)
+        self.assertEqual(list(Path(self.storage.name).rglob("*.pdf")), [])
+
+    def test_direct_upload_rejects_wrong_extension_mime_and_size(self) -> None:
+        invalid = self.client.post(
+            f"/api/v1/projects/{self.project_id}/documents/uploads",
+            json={
+                "kind": "course_material",
+                "filename": "notes.txt",
+                "content_type": "text/plain",
+                "size_bytes": 10,
+            },
+        )
+        self.assertEqual(invalid.status_code, 422, invalid.text)
+        self.assertIn(".pdf", invalid.json()["detail"])
+
+    def test_saved_syllabus_can_be_restored_after_page_refresh(self) -> None:
+        saved = self.client.put(
+            f"/api/v1/projects/{self.project_id}/syllabus",
+            json={"text": "恢复后的考纲", "document_id": None},
+        )
+        self.assertEqual(saved.status_code, 204, saved.text)
+        restored = self.client.get(f"/api/v1/projects/{self.project_id}/syllabus")
+        self.assertEqual(restored.status_code, 200, restored.text)
+        self.assertEqual(restored.json()["text"], "恢复后的考纲")
 
     def test_scanned_upload_persists_ocr_metadata_and_chunks(self) -> None:
         engine = FakeOCREngine()
@@ -249,10 +305,10 @@ class DocumentUploadAPITests(unittest.TestCase):
                     upload,
                 ))
             failed = session.query(Document).filter_by(project_id=self.project_id).one()
-            self.assertEqual(failed.processing_status, DocumentProcessingStatus.FAILED)
+            self.assertEqual(failed.processing_status, DocumentProcessingStatus.INTERRUPTED)
             self.assertIn("检测到扫描版 PDF，需要启用 OCR", failed.error_message or "")
-            self.assertIsNone(failed.storage_key)
-            self.assertEqual(list(Path(self.storage.name).rglob("*.pdf")), [])
+            self.assertIsNotNone(failed.storage_key)
+            self.assertEqual(len(list(Path(self.storage.name).rglob("*.pdf"))), 1)
 
     def test_upload_size_limit_returns_clear_error_and_cleans_partial_file(self) -> None:
         app.dependency_overrides[get_settings] = lambda: Settings(
@@ -270,7 +326,7 @@ class DocumentUploadAPITests(unittest.TestCase):
         self.assertIn("PDF 文件不能超过 1MB", response.json()["detail"])
         self.assertEqual(list(Path(self.storage.name).rglob("*.pdf")), [])
 
-    def test_page_limit_returns_clear_error_and_cleans_pdf(self) -> None:
+    def test_page_limit_returns_clear_error_and_retains_pdf_for_diagnosis(self) -> None:
         app.dependency_overrides[get_settings] = lambda: Settings(
             _env_file=None,
             database_url="sqlite+pysqlite:///:memory:",
@@ -284,7 +340,7 @@ class DocumentUploadAPITests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 422, response.text)
         self.assertIn("PDF 页数不能超过 1 页", response.json()["detail"])
-        self.assertEqual(list(Path(self.storage.name).rglob("*.pdf")), [])
+        self.assertEqual(len(list(Path(self.storage.name).rglob("*.pdf"))), 1)
 
 
 if __name__ == "__main__":

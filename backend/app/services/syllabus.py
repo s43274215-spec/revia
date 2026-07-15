@@ -21,12 +21,7 @@ class SyllabusService:
         self._db = db
 
     def upsert(self, workspace_id: uuid.UUID, project_id: uuid.UUID, payload: SyllabusUpsert) -> Syllabus:
-        project = self._db.scalar(select(Project).where(
-            Project.id == project_id,
-            Project.workspace_id == workspace_id,
-        ))
-        if project is None:
-            raise SyllabusProjectNotFoundError(f"Project {project_id} was not found")
+        project = self._project(workspace_id, project_id)
         if payload.document_id is not None:
             document = self._db.scalar(
                 select(Document)
@@ -52,3 +47,15 @@ class SyllabusService:
         self._db.commit()
         self._db.refresh(syllabus)
         return syllabus
+
+    def get(self, workspace_id: uuid.UUID, project_id: uuid.UUID) -> Syllabus | None:
+        return self._project(workspace_id, project_id).syllabus
+
+    def _project(self, workspace_id: uuid.UUID, project_id: uuid.UUID) -> Project:
+        project = self._db.scalar(select(Project).where(
+            Project.id == project_id,
+            Project.workspace_id == workspace_id,
+        ))
+        if project is None:
+            raise SyllabusProjectNotFoundError(f"Project {project_id} was not found")
+        return project

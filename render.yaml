@@ -32,6 +32,22 @@ services:
         value: 3.12.13
       - key: FILE_STORAGE_ROOT
         value: /tmp/revia
+      - key: STORAGE_BACKEND
+        value: r2
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET_NAME
+        sync: false
+      - key: R2_ENDPOINT
+        sync: false
+      - key: UPLOAD_URL_EXPIRES_SECONDS
+        value: "900"
+      - key: DOCUMENT_LEASE_SECONDS
+        value: "300"
       - key: AI_TIMEOUT_SECONDS
         value: "60"
       - key: AI_MAX_OUTPUT_TOKENS
@@ -49,6 +65,6 @@ services:
       - key: OCR_MINIMUM_TEXT_LENGTH
         value: "8"
       - key: MAX_UPLOAD_MB
-        value: "25"
+        value: "150"
       - key: MAX_PDF_PAGES
-        value: "120"
+        value: "500"

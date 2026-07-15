@@ -39,15 +39,29 @@ class Document(Base):
     mime_type: Mapped[str] = mapped_column(String(100), nullable=False)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     storage_key: Mapped[str | None] = mapped_column(String(1000), unique=True)
+    storage_backend: Mapped[str] = mapped_column(String(20), nullable=False, default="local")
     processing_status: Mapped[DocumentProcessingStatus] = mapped_column(
         Enum(DocumentProcessingStatus), default=DocumentProcessingStatus.UPLOADED, index=True
     )
+    total_pages: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    processed_pages: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failed_pages: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ocr_page_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    current_page: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    processing_phase: Mapped[str] = mapped_column(String(32), nullable=False, default="uploading")
+    lease_owner: Mapped[str | None] = mapped_column(String(64), index=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_message: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     project: Mapped["Project"] = relationship(back_populates="documents")
     parsed_document: Mapped["ParsedDocument | None"] = relationship(
         back_populates="document", cascade="all, delete-orphan", uselist=False
+    )
+    document_pages: Mapped[list["DocumentPage"]] = relationship(
+        back_populates="document", cascade="all, delete-orphan", order_by="DocumentPage.page_number"
     )
 
 

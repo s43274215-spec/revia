@@ -15,9 +15,24 @@ class DocumentKind(StrEnum):
 
 class DocumentProcessingStatus(StrEnum):
     UPLOADED = "uploaded"
+    QUEUED = "queued"
+    PROCESSING = "processing"
     PARSING = "parsing"
+    INTERRUPTED = "interrupted"
     PARSED = "parsed"
     FAILED = "failed"
+
+
+class DocumentPageStatus(StrEnum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class ExtractionMethod(StrEnum):
+    TEXT = "text"
+    OCR = "ocr"
 
 
 class GenerationStatus(StrEnum):

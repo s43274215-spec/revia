@@ -72,6 +72,14 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=deepseek-chat
 PYTHON_VERSION=3.12.13
 FILE_STORAGE_ROOT=/tmp/revia
+STORAGE_BACKEND=r2
+R2_ACCOUNT_ID=<Cloudflare account id>
+R2_ACCESS_KEY_ID=<private R2 access key id>
+R2_SECRET_ACCESS_KEY=<private R2 secret>
+R2_BUCKET_NAME=<private bucket name>
+R2_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
+UPLOAD_URL_EXPIRES_SECONDS=900
+DOCUMENT_LEASE_SECONDS=300
 AI_TIMEOUT_SECONDS=60
 AI_MAX_OUTPUT_TOKENS=4096
 AI_TEMPERATURE=0.1
@@ -80,8 +88,8 @@ MATCHING_MAX_CANDIDATES=3
 OCR_ENABLED=true
 OCR_DPI=144
 OCR_MINIMUM_TEXT_LENGTH=8
-MAX_UPLOAD_MB=25
-MAX_PDF_PAGES=120
+MAX_UPLOAD_MB=150
+MAX_PDF_PAGES=500
 ```
 
 生产配置缺失、仍指向本地数据库、仍使用 Mock AI 或仍包含本地 CORS 时，后端会明确拒绝启动。
@@ -109,13 +117,35 @@ NEXT_PUBLIC_API_BASE_URL=https://<your-render-service>.onrender.com/api/v1
 
 首次部署拿到稳定的 Vercel 默认域名后，将其精确写入 Render 的 `CORS_ORIGINS` JSON 数组并重新部署后端。浏览器请求会携带 `Authorization`，后端 CORS 已允许该请求头。
 
+## Cloudflare R2 临时对象存储
+
+1. 创建私有 R2 Bucket，不启用公开访问或 `r2.dev` 公网地址。
+2. 创建仅可读写该 Bucket 的 R2 API Token，将凭据只配置到 Render。
+3. `R2_ENDPOINT` 使用 S3 API 地址：`https://<account-id>.r2.cloudflarestorage.com`。
+4. 在 Bucket 的 CORS 中加入 Vercel 正式域名：
+
+```json
+[
+  {
+    "AllowedOrigins": ["https://<your-vercel-project>.vercel.app"],
+    "AllowedMethods": ["PUT"],
+    "AllowedHeaders": ["Content-Type"],
+    "ExposeHeaders": ["ETag"],
+    "MaxAgeSeconds": 3600
+  }
+]
+```
+
+浏览器只获得短期 presigned PUT URL，不会获得 R2 Secret。对象路径包含 `workspace_id/document_id`。页面解析未完成时保留原文件用于恢复；TextChunk 完整持久化后自动删除。过期失败对象可通过工作区受保护的清理接口删除。
+
 ## 免费部署限制
 
 - Render 免费 Web Service 会休眠，首次访问可能需要等待唤醒。
-- PDF 最大 25MB、120 页，只作为解析期间的临时文件。
-- 解析成功并保存 TextChunk 后立即删除 PDF；解析失败也会清理，因此不能依赖原文件重新解析。
-- OCR 采用 RapidOCR 和 ONNX Runtime CPU，按页处理。部署后先做小文件冒烟测试，再做 100 页真实压力测试。
-- 第一版不使用对象存储。
+- 单个 PDF 最大 150MB，生产默认最多 500 页；解析能力测试可通过测试配置覆盖到 600 页。
+- 浏览器直接上传完整 PDF 到私有 R2，Render 只逐页下载、提取或 OCR，不接收完整上传流量。
+- 每页结果立即写入 PostgreSQL；Render 休眠或重启后从首个未完成页面继续，不重复 OCR 已完成页面。
+- OCR 采用 RapidOCR 和 ONNX Runtime CPU，严格逐页处理，不在内存中保留全部页面图像。
+- TextChunk 保存成功后删除 R2 原文件；未完成解析保留原文件用于恢复。
 
 ## 安全边界
 

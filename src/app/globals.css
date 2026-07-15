@@ -191,6 +191,7 @@ mark { padding:1px 2px; background:#dfe9e3; color:inherit; }
 .file-symbol { display:grid; place-items:center; width:33px; height:33px; margin:0 auto 13px; border:1px solid #d7ddd8; border-radius:8px; background:#fff; color:var(--accent); font-size:16px; }
 .file-drop-zone>strong { display:block; font-family:Georgia,"Songti SC",serif; font-size:13px; }
 .file-drop-zone>p { margin:7px 0 15px; color:var(--faint); font-size:10px; }
+.file-drop-zone>.file-validation-error { color:#9c5148; }
 .file-drop-zone>button { padding:7px 11px; border:1px solid var(--line); border-radius:6px; background:#fff; font-size:10px; cursor:pointer; }
 .selected-files { margin-top:18px; border-top:1px solid var(--line); text-align:left; }
 .selected-files>div { display:flex; align-items:center; gap:10px; padding:12px 4px 0; }

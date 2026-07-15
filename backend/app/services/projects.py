@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import Callable
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -46,7 +47,22 @@ class ProjectService:
         self._db.refresh(project)
         return project
 
-    def delete(self, workspace_id: uuid.UUID, project_id: uuid.UUID) -> None:
+    def delete(
+        self,
+        workspace_id: uuid.UUID,
+        project_id: uuid.UUID,
+        *,
+        delete_object: Callable[[str], None] | None = None,
+    ) -> None:
         project = self.get(workspace_id, project_id)
+        if delete_object is not None:
+            for document in project.documents:
+                if not document.storage_key:
+                    continue
+                try:
+                    delete_object(document.storage_key)
+                except Exception:
+                    # Database deletion must not be blocked by best-effort object cleanup.
+                    continue
         self._db.delete(project)
         self._db.commit()
