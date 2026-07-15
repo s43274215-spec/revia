@@ -1,0 +1,21 @@
+请为以下课程生成 Revia 学习材料。
+
+课程名称：{project_name}
+项目 ID：{project_id}
+考纲：
+{syllabus_text}
+
+资料上下文：
+{source_context}
+
+输出必须符合以下 JSON 层级：
+Project → Chapter → KnowledgePoint → BulletPoint → ContentVersion。
+
+字段要求：
+- project_id：沿用输入项目 ID。
+- chapters：章节数组，每章包含 id、title、knowledge_points。
+- knowledge_points：知识点数组，每项包含 id、title、bullet_points。
+- bullet_points：要点数组，每项包含稳定 id 和 versions。
+- versions：必须且只能包含 original、recitation、keywords 三项。
+- 每个版本分别包含 kind、title、content。
+- original 保留完整信息；recitation 适合背诵和考试表达；keywords 提供简洁记忆线索。

@@ -1,0 +1,52 @@
+import uuid
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.models.project import Project
+from app.schemas.project import ProjectCreate, ProjectUpdate
+
+
+class ProjectNotFoundError(LookupError):
+    pass
+
+
+class ProjectService:
+    def __init__(self, db: Session) -> None:
+        self._db = db
+
+    def list(self, workspace_id: uuid.UUID) -> list[Project]:
+        statement = select(Project).where(Project.workspace_id == workspace_id).order_by(Project.created_at.desc())
+        return list(self._db.scalars(statement).all())
+
+    def create(self, workspace_id: uuid.UUID, payload: ProjectCreate) -> Project:
+        project = Project(workspace_id=workspace_id, name=payload.name.strip(), description=payload.description)
+        self._db.add(project)
+        self._db.commit()
+        self._db.refresh(project)
+        return project
+
+    def get(self, workspace_id: uuid.UUID, project_id: uuid.UUID) -> Project:
+        project = self._db.scalar(select(Project).where(
+            Project.id == project_id,
+            Project.workspace_id == workspace_id,
+        ))
+        if project is None:
+            raise ProjectNotFoundError(f"Project {project_id} was not found")
+        return project
+
+    def update(self, workspace_id: uuid.UUID, project_id: uuid.UUID, payload: ProjectUpdate) -> Project:
+        project = self.get(workspace_id, project_id)
+        changes = payload.model_dump(exclude_unset=True)
+        if "name" in changes and changes["name"] is not None:
+            changes["name"] = changes["name"].strip()
+        for field, value in changes.items():
+            setattr(project, field, value)
+        self._db.commit()
+        self._db.refresh(project)
+        return project
+
+    def delete(self, workspace_id: uuid.UUID, project_id: uuid.UUID) -> None:
+        project = self.get(workspace_id, project_id)
+        self._db.delete(project)
+        self._db.commit()

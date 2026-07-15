@@ -1,0 +1,54 @@
+services:
+  - type: web
+    name: revia-api
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: APP_ACCESS_CODE
+        sync: false
+      - key: SESSION_SIGNING_KEY
+        sync: false
+      - key: CREDENTIAL_ENCRYPTION_KEY
+        sync: false
+      - key: AI_MODE
+        value: live
+      - key: AI_PROVIDER
+        value: deepseek
+      - key: DEEPSEEK_BASE_URL
+        value: https://api.deepseek.com
+      - key: DEEPSEEK_MODEL
+        value: deepseek-chat
+      - key: PYTHON_VERSION
+        value: 3.12.13
+      - key: FILE_STORAGE_ROOT
+        value: /tmp/revia
+      - key: AI_TIMEOUT_SECONDS
+        value: "60"
+      - key: AI_MAX_OUTPUT_TOKENS
+        value: "4096"
+      - key: AI_TEMPERATURE
+        value: "0.1"
+      - key: MATCHING_THRESHOLD
+        value: "0.35"
+      - key: MATCHING_MAX_CANDIDATES
+        value: "3"
+      - key: OCR_ENABLED
+        value: "true"
+      - key: OCR_DPI
+        value: "144"
+      - key: OCR_MINIMUM_TEXT_LENGTH
+        value: "8"
+      - key: MAX_UPLOAD_MB
+        value: "25"
+      - key: MAX_PDF_PAGES
+        value: "120"

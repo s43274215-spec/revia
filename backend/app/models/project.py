@@ -1,0 +1,83 @@
+import uuid
+from datetime import datetime
+
+from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Integer, JSON, String, Text, func
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.db.base import Base
+from app.models.enums import DocumentKind, DocumentProcessingStatus, GenerationStatus, ProjectStatus
+
+
+class Project(Base):
+    __tablename__ = "projects"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[ProjectStatus] = mapped_column(Enum(ProjectStatus), default=ProjectStatus.NOT_UPLOADED, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    workspace: Mapped["Workspace"] = relationship(back_populates="projects")
+    documents: Mapped[list["Document"]] = relationship(back_populates="project", cascade="all, delete-orphan")
+    syllabus: Mapped["Syllabus | None"] = relationship(back_populates="project", cascade="all, delete-orphan", uselist=False)
+    generation_jobs: Mapped[list["GenerationJob"]] = relationship(back_populates="project", cascade="all, delete-orphan")
+    chapters: Mapped[list["Chapter"]] = relationship(back_populates="project", cascade="all, delete-orphan", order_by="Chapter.position")
+
+
+class Document(Base):
+    __tablename__ = "documents"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[DocumentKind] = mapped_column(Enum(DocumentKind), nullable=False)
+    original_name: Mapped[str] = mapped_column(String(500), nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    storage_key: Mapped[str | None] = mapped_column(String(1000), unique=True)
+    processing_status: Mapped[DocumentProcessingStatus] = mapped_column(
+        Enum(DocumentProcessingStatus), default=DocumentProcessingStatus.UPLOADED, index=True
+    )
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    project: Mapped["Project"] = relationship(back_populates="documents")
+    parsed_document: Mapped["ParsedDocument | None"] = relationship(
+        back_populates="document", cascade="all, delete-orphan", uselist=False
+    )
+
+
+class Syllabus(Base):
+    __tablename__ = "syllabi"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), unique=True, index=True)
+    text: Mapped[str | None] = mapped_column(Text)
+    document_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("documents.id", ondelete="SET NULL"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    project: Mapped["Project"] = relationship(back_populates="syllabus")
+
+
+class GenerationJob(Base):
+    __tablename__ = "generation_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    status: Mapped[GenerationStatus] = mapped_column(Enum(GenerationStatus), default=GenerationStatus.PENDING, index=True)
+    provider: Mapped[str] = mapped_column(String(100), default="deepseek")
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    processed_items: Mapped[int] = mapped_column(Integer, default=0)
+    total_items: Mapped[int] = mapped_column(Integer, default=0)
+    item_failures: Mapped[list[dict[str, str]]] = mapped_column(JSON, default=list)
+    status_history: Mapped[list[str]] = mapped_column(JSON, default=list)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    project: Mapped["Project"] = relationship(back_populates="generation_jobs")
