@@ -20,6 +20,7 @@ from app.models.enums import (
     DocumentPageStatus,
     DocumentProcessingStatus,
     ExtractionMethod,
+    WorkspaceRole,
 )
 from app.models.project import Document, Project
 from app.models.workspace import QuotaGuard, Workspace
@@ -145,6 +146,7 @@ class DocumentProcessingService:
                 storage_backend=self._storage.backend_name,
                 processing_status=DocumentProcessingStatus.UPLOADED,
                 processing_phase="uploading",
+                queue_priority=0 if workspace.role == WorkspaceRole.OWNER else 10,
             )
             self._db.add(document)
             self._db.commit()
@@ -187,7 +189,10 @@ class DocumentProcessingService:
             self._reject_uploaded_object(document, "上传文件大小与创建上传任务时不一致")
         with _quota_lock:
             self._lock_quota_guard()
-            self._db.scalar(select(Workspace).where(Workspace.id == workspace_id).with_for_update())
+            workspace = self._db.scalar(select(Workspace).where(Workspace.id == workspace_id).with_for_update())
+            if workspace is None:
+                self._db.rollback()
+                raise DocumentProjectNotFoundError("工作区不存在")
             if self._active_document_count(workspace_id, exclude_document_id=document.id) >= self._workspace_max_active_documents:
                 self._reject_uploaded_object(
                     document,
@@ -214,23 +219,28 @@ class DocumentProcessingService:
         cutoff = now - timedelta(hours=24)
         with _quota_lock:
             self._lock_quota_guard()
-            self._db.scalar(select(Workspace).where(Workspace.id == workspace_id).with_for_update())
+            workspace = self._db.scalar(select(Workspace).where(Workspace.id == workspace_id).with_for_update())
+            if workspace is None:
+                self._db.rollback()
+                raise DocumentProjectNotFoundError("工作区不存在")
             if self._active_document_count(workspace_id, exclude_document_id=document.id) >= self._workspace_max_active_documents:
                 self._reject_uploaded_object(document, "当前已有一份资料正在排队或处理中，请完成后再上传。", quota=True)
-            workspace_pages = self._rolling_page_total(cutoff, workspace_id=workspace_id)
-            if workspace_pages + total_pages > self._workspace_rolling_24h_page_limit:
-                self._reject_uploaded_object(
-                    document,
-                    f"你最近24小时已处理{workspace_pages}页资料，接受本文件后将超过{self._workspace_rolling_24h_page_limit}页，请稍后再试。",
-                    quota=True,
-                )
-            global_pages = self._rolling_page_total(cutoff)
-            if global_pages + total_pages > self._global_rolling_24h_page_limit:
-                self._reject_uploaded_object(
-                    document,
-                    "当前全站任务较多，最近24小时处理额度已用完，请稍后再试。",
-                    quota=True,
-                )
+            is_owner = workspace.role == WorkspaceRole.OWNER
+            if not is_owner:
+                workspace_pages = self._rolling_page_total(cutoff, workspace_id=workspace_id)
+                if workspace_pages + total_pages > self._workspace_rolling_24h_page_limit:
+                    self._reject_uploaded_object(
+                        document,
+                        f"你最近24小时已处理{workspace_pages}页资料，接受本文件后将超过{self._workspace_rolling_24h_page_limit}页，请稍后再试。",
+                        quota=True,
+                    )
+                global_pages = self._rolling_page_total(cutoff)
+                if global_pages + total_pages > self._global_rolling_24h_page_limit:
+                    self._reject_uploaded_object(
+                        document,
+                        "当前全站任务较多，最近24小时处理额度已用完，请稍后再试。",
+                        quota=True,
+                    )
             document.total_pages = total_pages
             document.quota_pages = total_pages
             document.accepted_at = now
@@ -428,7 +438,7 @@ class DocumentProcessingService:
                     Document.processing_status.in_(QUEUE_DOCUMENT_STATUSES),
                     or_(Document.lease_owner.is_(None), Document.lease_expires_at < now),
                 )
-                .order_by(Document.accepted_at.asc(), Document.created_at.asc())
+                .order_by(Document.queue_priority.asc(), Document.accepted_at.asc(), Document.created_at.asc())
                 .with_for_update(skip_locked=True)
                 .limit(1)
             )
@@ -467,7 +477,7 @@ class DocumentProcessingService:
         ordered = list(self._db.scalars(
             select(Document.id)
             .where(Document.processing_status.in_([DocumentProcessingStatus.QUEUED, DocumentProcessingStatus.INTERRUPTED]))
-            .order_by(Document.accepted_at.asc(), Document.created_at.asc())
+            .order_by(Document.queue_priority.asc(), Document.accepted_at.asc(), Document.created_at.asc())
         ).all())
         try:
             return ordered.index(document.id) + 1
@@ -689,9 +699,11 @@ class DocumentProcessingService:
         query = (
             select(func.coalesce(func.sum(Document.quota_pages), 0))
             .join(Project, Document.project_id == Project.id)
+            .join(Workspace, Project.workspace_id == Workspace.id)
             .where(
                 Document.accepted_at >= cutoff,
                 Document.quota_released_at.is_(None),
+                Workspace.role == WorkspaceRole.PUBLIC,
             )
         )
         if workspace_id is not None:

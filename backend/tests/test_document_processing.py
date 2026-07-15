@@ -151,6 +151,7 @@ class DocumentUploadAPITests(unittest.TestCase):
         app.dependency_overrides[get_settings] = lambda: Settings(
             database_url="sqlite+pysqlite:///:memory:",
             file_storage_root=self.storage.name,
+            public_access_enabled=True,
         )
         self.client = TestClient(app)
         self.client.headers.update(authorization_header(self.workspace_id))
@@ -316,6 +317,7 @@ class DocumentUploadAPITests(unittest.TestCase):
             database_url="sqlite+pysqlite:///:memory:",
             file_storage_root=self.storage.name,
             max_upload_mb=1,
+            public_access_enabled=True,
         )
         response = self.client.post(
             f"/api/v1/projects/{self.project_id}/documents",
@@ -332,6 +334,7 @@ class DocumentUploadAPITests(unittest.TestCase):
             database_url="sqlite+pysqlite:///:memory:",
             file_storage_root=self.storage.name,
             max_pdf_pages=1,
+            public_access_enabled=True,
         )
         response = self.client.post(
             f"/api/v1/projects/{self.project_id}/documents",

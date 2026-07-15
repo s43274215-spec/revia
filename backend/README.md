@@ -6,12 +6,15 @@
 
 ```text
 Workspace
+├── role: owner / public
 ├── DeepSeekCredential
 └── Project
     ├── Document → DocumentPage → ParsedDocument → ParsedPage / TextChunk
     ├── Syllabus
     ├── GenerationJob
     └── Chapter → KnowledgePoint → BulletPoint → ContentVersion
+
+SiteSettings（单例）保存运行时公开状态和最后修改者。`APP_ACCESS_CODE` 登录始终返回唯一 Owner Workspace；普通工作区不能修改站点配置。
 ```
 
 所有业务 API 都要求 `Authorization: Bearer <workspace-token>`。`Project.workspace_id` 是项目及其全部下游数据的唯一归属来源；跨工作区查询返回 404。DeepSeek Key 按 workspace 单独使用 Fernet 认证加密后存入 PostgreSQL，主密钥只来自 `CREDENTIAL_ENCRYPTION_KEY`。

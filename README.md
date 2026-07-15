@@ -111,7 +111,7 @@ cd backend
 .\.venv\Scripts\python.exe -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-公开模式下，用户点击“开始使用 Revia”后，后端签发带签名的匿名工作区 Token；关闭公开模式后仍使用访问码。每个工作区的 DeepSeek Key 使用 `CREDENTIAL_ENCRYPTION_KEY` 加密后保存在 PostgreSQL，Render 重启不会丢失。
+公开模式下，用户点击“开始使用 Revia”后，后端签发带签名的匿名工作区 Token。`APP_ACCESS_CODE` 始终用于唯一、持久化的 Owner Workspace；Owner 可在设置中即时开启或关闭公开访问，无需重新部署。数据库尚无站点配置时，`PUBLIC_ACCESS_ENABLED` 才作为初始值。每个工作区的 DeepSeek Key 使用 `CREDENTIAL_ENCRYPTION_KEY` 加密后保存在 PostgreSQL，Render 重启不会丢失。
 
 ## Vercel 前端
 
@@ -150,6 +150,7 @@ NEXT_PUBLIC_API_BASE_URL=https://<your-render-service>.onrender.com/api/v1
 - 单个 PDF 最大 150MB、600 页；每个工作区同时最多一份活动文档，最近 24 小时累计最多接受 1200 页，全站最多 3000 页。
 - 浏览器直接上传完整 PDF 到私有 S3 兼容存储，Render 只逐页下载、提取或 OCR，不接收完整上传流量。
 - 每页结果立即写入 PostgreSQL；Render 休眠或重启后从首个未完成页面继续，不重复 OCR 已完成页面。
+- 当前解析任务不会被抢占；完成后优先领取 Owner 等待任务，再按普通任务接受时间继续队列。
 - OCR 采用 RapidOCR 和 ONNX Runtime CPU，严格逐页处理，不在内存中保留全部页面图像。
 - TextChunk 保存成功后删除对象存储原文件；未完成解析保留原文件用于恢复。
 

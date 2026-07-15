@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel, Field
 
 
@@ -28,3 +30,12 @@ class DeepSeekSettingsResult(BaseModel):
 class DeepSeekConnectionResult(BaseModel):
     success: bool
     message: str
+
+
+class SiteSettingsRead(BaseModel):
+    public_access_enabled: bool
+    updated_at: datetime
+
+
+class SiteSettingsUpdate(BaseModel):
+    public_access_enabled: bool

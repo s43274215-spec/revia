@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from cryptography.fernet import Fernet
 from pydantic import ValidationError
 from sqlalchemy import create_engine
+from sqlalchemy import delete
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -18,6 +19,7 @@ from app.core.config import Settings, get_settings
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
+from app.models.workspace import SiteSettings
 from app.services.storage import build_object_key, build_storage_provider
 
 
@@ -57,7 +59,9 @@ class AccessControlTests(unittest.TestCase):
             "/api/v1/auth/session",
             headers={"Authorization": f"Bearer {token}"},
         )
-        self.assertEqual(verified.json(), {"workspace_id": workspace_id})
+        self.assertEqual(verified.json(), {"workspace_id": workspace_id, "role": "owner"})
+        repeated = self.client.post("/api/v1/auth/access", json={"access_code": "test-access-code"})
+        self.assertEqual(repeated.json()["workspace_id"], workspace_id)
 
         tampered = self.client.get(
             "/api/v1/auth/session",
@@ -68,8 +72,11 @@ class AccessControlTests(unittest.TestCase):
     def test_public_mode_issues_anonymous_workspace_and_private_mode_hides_endpoint(self) -> None:
         mode = self.client.get("/api/v1/auth/mode")
         self.assertEqual(mode.json(), {"public_access_enabled": False})
-        self.assertEqual(self.client.post("/api/v1/auth/anonymous").status_code, 404)
+        self.assertEqual(self.client.post("/api/v1/auth/anonymous").status_code, 403)
 
+        with self.Session() as session:
+            session.execute(delete(SiteSettings))
+            session.commit()
         public_settings = Settings(_env_file=None, public_access_enabled=True)
         app.dependency_overrides[get_settings] = lambda: public_settings
         self.assertEqual(
@@ -169,7 +176,7 @@ class AlembicMigrationTests(unittest.TestCase):
                 with engine.connect() as connection:
                     revision = connection.exec_driver_sql("select version_num from alembic_version").scalar_one()
                     table_names = set(connection.dialect.get_table_names(connection))
-                self.assertEqual(revision, "20260716_0003")
+                self.assertEqual(revision, "20260716_0004")
                 self.assertEqual(table_names - {"alembic_version"}, set(Base.metadata.tables))
             finally:
                 engine.dispose()

@@ -102,13 +102,12 @@ class Settings(BaseSettings):
             raise ValueError("Upload URL and document lease durations must be positive")
         if self.environment.casefold() == "production":
             required = {
+                "APP_ACCESS_CODE": self.app_access_code,
                 "SESSION_SIGNING_KEY": self.session_signing_key,
                 "CREDENTIAL_ENCRYPTION_KEY": self.credential_encryption_key,
                 "DATABASE_URL": self.database_url,
                 "CORS_ORIGINS": self.cors_origins,
             }
-            if not self.public_access_enabled:
-                required["APP_ACCESS_CODE"] = self.app_access_code
             missing = [name for name, value in required.items() if not value]
             if missing:
                 raise ValueError(f"Production configuration is missing: {', '.join(missing)}")
@@ -118,7 +117,7 @@ class Settings(BaseSettings):
                 raise ValueError("Production CORS_ORIGINS must not contain local development origins")
             if self.ai_mode != "live":
                 raise ValueError("Production AI_MODE must be live")
-            if (not self.public_access_enabled and self.app_access_code == "revia-local") or self.session_signing_key.startswith("revia-local"):
+            if self.app_access_code == "revia-local" or self.session_signing_key.startswith("revia-local"):
                 raise ValueError("Production access and signing secrets must be explicitly configured")
             if self.credential_encryption_key == "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=":
                 raise ValueError("Production CREDENTIAL_ENCRYPTION_KEY must be explicitly configured")

@@ -32,7 +32,7 @@ class Project(Base):
 class Document(Base):
     __tablename__ = "documents"
     __table_args__ = (
-        Index("ix_documents_queue_order", "processing_status", "accepted_at", "created_at"),
+        Index("ix_documents_queue_order", "processing_status", "queue_priority", "accepted_at", "created_at"),
         Index("ix_documents_project_quota_window", "project_id", "accepted_at", "quota_released_at"),
     )
 
@@ -56,6 +56,7 @@ class Document(Base):
     lease_owner: Mapped[str | None] = mapped_column(String(64), index=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    queue_priority: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     processing_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
