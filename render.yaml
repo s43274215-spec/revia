@@ -16,6 +16,8 @@ services:
         sync: false
       - key: APP_ACCESS_CODE
         sync: false
+      - key: PUBLIC_ACCESS_ENABLED
+        value: "true"
       - key: SESSION_SIGNING_KEY
         sync: false
       - key: CREDENTIAL_ENCRYPTION_KEY
@@ -33,17 +35,19 @@ services:
       - key: FILE_STORAGE_ROOT
         value: /tmp/revia
       - key: STORAGE_BACKEND
-        value: r2
-      - key: R2_ACCOUNT_ID
+        value: s3
+      - key: S3_ENDPOINT
         sync: false
-      - key: R2_ACCESS_KEY_ID
+      - key: S3_REGION
+        value: auto
+      - key: S3_ACCESS_KEY_ID
         sync: false
-      - key: R2_SECRET_ACCESS_KEY
+      - key: S3_SECRET_ACCESS_KEY
         sync: false
-      - key: R2_BUCKET_NAME
+      - key: S3_BUCKET_NAME
         sync: false
-      - key: R2_ENDPOINT
-        sync: false
+      - key: S3_FORCE_PATH_STYLE
+        value: "false"
       - key: UPLOAD_URL_EXPIRES_SECONDS
         value: "900"
       - key: DOCUMENT_LEASE_SECONDS
@@ -67,4 +71,12 @@ services:
       - key: MAX_UPLOAD_MB
         value: "150"
       - key: MAX_PDF_PAGES
-        value: "500"
+        value: "600"
+      - key: WORKSPACE_MAX_ACTIVE_DOCUMENTS
+        value: "1"
+      - key: WORKSPACE_ROLLING_24H_PAGE_LIMIT
+        value: "1200"
+      - key: GLOBAL_MAX_PROCESSING_DOCUMENTS
+        value: "1"
+      - key: GLOBAL_ROLLING_24H_PAGE_LIMIT
+        value: "3000"

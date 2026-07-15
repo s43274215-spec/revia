@@ -35,10 +35,21 @@ async def lifespan(application: FastAPI):
         lambda db: build_document_processing_service(db, settings),
     )
     application.state.document_task_runner = runner
-    resume_task = asyncio.create_task(asyncio.to_thread(runner.resume_incomplete))
+    async def keep_queue_moving() -> None:
+        while True:
+            try:
+                await asyncio.to_thread(runner.resume_incomplete)
+            except Exception:
+                logging.getLogger("revia.documents").exception("Persistent document queue dispatch failed")
+            await asyncio.sleep(min(30, max(5, settings.document_lease_seconds // 3)))
+
+    resume_task = asyncio.create_task(keep_queue_moving())
     yield
-    if not resume_task.done():
-        resume_task.cancel()
+    resume_task.cancel()
+    try:
+        await resume_task
+    except asyncio.CancelledError:
+        pass
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)

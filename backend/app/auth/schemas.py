@@ -14,3 +14,7 @@ class WorkspaceSessionRead(BaseModel):
 
 class WorkspaceRead(BaseModel):
     workspace_id: uuid.UUID
+
+
+class AccessModeRead(BaseModel):
+    public_access_enabled: bool

@@ -44,7 +44,7 @@ export type DocumentProgress = {
   original_name: string;
   mime_type: string;
   size_bytes: number;
-  storage_backend: "local" | "r2";
+  storage_backend: "local" | "s3";
   processing_status: DocumentProcessingStatus;
   total_pages: number;
   processed_pages: number;
@@ -56,6 +56,7 @@ export type DocumentProgress = {
   error_message: string | null;
   created_at: string;
   is_resuming: boolean;
+  queue_position: number | null;
 };
 
 type DocumentUploadTarget = {

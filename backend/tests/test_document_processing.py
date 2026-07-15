@@ -326,7 +326,7 @@ class DocumentUploadAPITests(unittest.TestCase):
         self.assertIn("PDF 文件不能超过 1MB", response.json()["detail"])
         self.assertEqual(list(Path(self.storage.name).rglob("*.pdf")), [])
 
-    def test_page_limit_returns_clear_error_and_retains_pdf_for_diagnosis(self) -> None:
+    def test_page_limit_returns_clear_error_and_deletes_rejected_pdf(self) -> None:
         app.dependency_overrides[get_settings] = lambda: Settings(
             _env_file=None,
             database_url="sqlite+pysqlite:///:memory:",
@@ -340,7 +340,7 @@ class DocumentUploadAPITests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 422, response.text)
         self.assertIn("PDF 页数不能超过 1 页", response.json()["detail"])
-        self.assertEqual(len(list(Path(self.storage.name).rglob("*.pdf"))), 1)
+        self.assertEqual(len(list(Path(self.storage.name).rglob("*.pdf"))), 0)
 
 
 if __name__ == "__main__":

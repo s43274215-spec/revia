@@ -19,11 +19,11 @@ def get_current_workspace_id(
     db: Annotated[Session, Depends(get_db)],
 ) -> uuid.UUID:
     if credentials is None or credentials.scheme.casefold() != "bearer":
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="需要访问码授权")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="需要工作区授权")
     try:
         workspace_id = SessionTokenSigner(settings.session_signing_key).verify(credentials.credentials)
     except SessionTokenError as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="工作区凭证无效，请重新输入访问码") from exc
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="工作区凭证无效，请重新授权") from exc
     if db.get(Workspace, workspace_id) is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="匿名工作区不存在")
     return workspace_id

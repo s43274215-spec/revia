@@ -1,6 +1,22 @@
 import { API_BASE_URL, apiRequest } from "./api-base";
 
 export type WorkspaceSession = { token: string; workspace_id: string };
+export type AccessMode = { public_access_enabled: boolean };
+
+export async function getAccessMode(): Promise<AccessMode> {
+  const response = await fetch(`${API_BASE_URL}/auth/mode`, { cache: "no-store" });
+  if (!response.ok) throw new Error(`无法读取访问模式（HTTP ${response.status}）`);
+  return response.json() as Promise<AccessMode>;
+}
+
+export async function createAnonymousWorkspace(): Promise<WorkspaceSession> {
+  const response = await fetch(`${API_BASE_URL}/auth/anonymous`, { method: "POST" });
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(body?.detail || `无法创建工作区（HTTP ${response.status}）`);
+  }
+  return response.json() as Promise<WorkspaceSession>;
+}
 
 export async function unlockWorkspace(accessCode: string): Promise<WorkspaceSession> {
   const response = await fetch(`${API_BASE_URL}/auth/access`, {

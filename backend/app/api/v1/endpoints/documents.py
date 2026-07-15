@@ -28,6 +28,7 @@ from app.schemas.project import DocumentRead, SyllabusRead, SyllabusUpsert
 from app.services.document_processing import (
     DocumentNotFoundError,
     DocumentProcessingError,
+    DocumentQuotaError,
     DocumentProcessingService,
     DocumentProjectNotFoundError,
     DocumentTaskRunner,
@@ -59,6 +60,10 @@ def build_document_processing_service(db: Session, settings: Settings) -> Docume
         max_upload_bytes=settings.max_upload_mb * 1024 * 1024,
         upload_url_expires_seconds=settings.upload_url_expires_seconds,
         lease_seconds=settings.document_lease_seconds,
+        workspace_max_active_documents=settings.workspace_max_active_documents,
+        workspace_rolling_24h_page_limit=settings.workspace_rolling_24h_page_limit,
+        global_max_processing_documents=settings.global_max_processing_documents,
+        global_rolling_24h_page_limit=settings.global_rolling_24h_page_limit,
     )
 
 
@@ -110,6 +115,8 @@ def create_document_upload(
         )
     except (DocumentProjectNotFoundError, DocumentNotFoundError) as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except DocumentQuotaError as exc:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
     except (DocumentProcessingError, StorageError) as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     return DocumentUploadTargetRead(
@@ -194,11 +201,13 @@ def confirm_document_upload(
         document = service.confirm_upload(workspace_id, project_id, document_id)
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except DocumentQuotaError as exc:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
     except (DocumentProcessingError, StorageError) as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     if document.processing_status != DocumentProcessingStatus.PARSED:
         background_tasks.add_task(runner.run, document.id)
-    return _progress(document)
+    return _progress(document, service.queue_position(document))
 
 
 @router.get("/{project_id}/documents/latest", response_model=DocumentProgressRead | None)
@@ -222,7 +231,7 @@ def get_latest_document(
         except (DocumentProcessingError, StorageError):
             pass
     _schedule_resume(document, runner, background_tasks)
-    return _progress(document)
+    return _progress(document, service.queue_position(document))
 
 
 @router.get("/{project_id}/documents/{document_id}", response_model=DocumentProgressRead)
@@ -239,7 +248,7 @@ def get_document_progress(
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     _schedule_resume(document, runner, background_tasks)
-    return _progress(document)
+    return _progress(document, service.queue_position(document))
 
 
 @router.post("/{project_id}/document-cleanup/expired")
@@ -295,6 +304,8 @@ async def upload_document_legacy(
         document = await service.process_upload(workspace_id, project_id, kind, file)
     except DocumentProjectNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except DocumentQuotaError as exc:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
     except DocumentProcessingError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     if document.parsed_document is None:
@@ -335,8 +346,9 @@ def _schedule_resume(document: Document, runner: DocumentTaskRunner, background_
         background_tasks.add_task(runner.run, document.id)
 
 
-def _progress(document: Document) -> DocumentProgressRead:
+def _progress(document: Document, queue_position: int | None = None) -> DocumentProgressRead:
     payload = DocumentProgressRead.model_validate(document)
+    payload.queue_position = queue_position
     payload.is_resuming = document.processing_phase == "resuming" or (
         document.processed_pages > 0
         and document.processing_status in {

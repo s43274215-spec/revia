@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, LargeBinary, String, func
+from sqlalchemy import DateTime, ForeignKey, Integer, LargeBinary, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -36,3 +36,14 @@ class DeepSeekCredential(Base):
     )
 
     workspace: Mapped["Workspace"] = relationship(back_populates="deepseek_credential")
+
+
+class QuotaGuard(Base):
+    """Single locked row serializing rolling quota acceptance and queue claims."""
+
+    __tablename__ = "quota_guards"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

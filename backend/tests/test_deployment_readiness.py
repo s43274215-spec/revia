@@ -65,6 +65,27 @@ class AccessControlTests(unittest.TestCase):
         )
         self.assertEqual(tampered.status_code, 401)
 
+    def test_public_mode_issues_anonymous_workspace_and_private_mode_hides_endpoint(self) -> None:
+        mode = self.client.get("/api/v1/auth/mode")
+        self.assertEqual(mode.json(), {"public_access_enabled": False})
+        self.assertEqual(self.client.post("/api/v1/auth/anonymous").status_code, 404)
+
+        public_settings = Settings(_env_file=None, public_access_enabled=True)
+        app.dependency_overrides[get_settings] = lambda: public_settings
+        self.assertEqual(
+            self.client.get("/api/v1/auth/mode").json(),
+            {"public_access_enabled": True},
+        )
+        first = self.client.post("/api/v1/auth/anonymous")
+        second = self.client.post("/api/v1/auth/anonymous")
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertNotEqual(first.json()["workspace_id"], second.json()["workspace_id"])
+        session = self.client.get(
+            "/api/v1/auth/session",
+            headers={"Authorization": f"Bearer {first.json()['token']}"},
+        )
+        self.assertEqual(session.status_code, 200)
+
 
 class ProductionConfigurationTests(unittest.TestCase):
     def test_neon_urls_and_both_cors_formats_are_supported(self) -> None:
@@ -85,7 +106,7 @@ class ProductionConfigurationTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             Settings(_env_file=None, environment="production")
 
-    def test_production_requires_r2_and_accepts_complete_private_storage_configuration(self) -> None:
+    def test_production_requires_s3_and_accepts_complete_private_storage_configuration(self) -> None:
         common = {
             "environment": "production",
             "database_url": "postgresql://user:pass@neon.example/revia",
@@ -100,14 +121,14 @@ class ProductionConfigurationTests(unittest.TestCase):
         settings = Settings(
             _env_file=None,
             **common,
-            storage_backend="r2",
-            r2_account_id="account",
-            r2_access_key_id="access-id",
-            r2_secret_access_key="synthetic-secret",
-            r2_bucket_name="private-revia",
-            r2_endpoint="https://account.r2.cloudflarestorage.com",
+            storage_backend="s3",
+            s3_region="auto",
+            s3_access_key_id="access-id",
+            s3_secret_access_key="synthetic-secret",
+            s3_bucket_name="private-revia",
+            s3_endpoint="https://s3.example.com",
         )
-        self.assertEqual(settings.storage_backend, "r2")
+        self.assertEqual(settings.storage_backend, "s3")
         provider = build_storage_provider(settings)
         workspace_id = uuid.uuid4()
         document_id = uuid.uuid4()
@@ -148,7 +169,7 @@ class AlembicMigrationTests(unittest.TestCase):
                 with engine.connect() as connection:
                     revision = connection.exec_driver_sql("select version_num from alembic_version").scalar_one()
                     table_names = set(connection.dialect.get_table_names(connection))
-                self.assertEqual(revision, "20260716_0002")
+                self.assertEqual(revision, "20260716_0003")
                 self.assertEqual(table_names - {"alembic_version"}, set(Base.metadata.tables))
             finally:
                 engine.dispose()

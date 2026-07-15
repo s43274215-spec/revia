@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from threading import RLock
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Callable
@@ -21,6 +22,7 @@ from app.models.enums import (
     ExtractionMethod,
 )
 from app.models.project import Document, Project
+from app.models.workspace import QuotaGuard, Workspace
 from app.services.storage import (
     LocalStorageProvider,
     StorageError,
@@ -33,6 +35,10 @@ from app.services.storage import (
 
 
 class DocumentProcessingError(RuntimeError):
+    pass
+
+
+class DocumentQuotaError(DocumentProcessingError):
     pass
 
 
@@ -52,6 +58,25 @@ class SimulatedInterruption(RuntimeError):
     pass
 
 
+ACTIVE_DOCUMENT_STATUSES = (
+    DocumentProcessingStatus.QUEUED,
+    DocumentProcessingStatus.PROCESSING,
+    DocumentProcessingStatus.PARSING,
+    DocumentProcessingStatus.INTERRUPTED,
+)
+
+QUEUE_DOCUMENT_STATUSES = (
+    DocumentProcessingStatus.QUEUED,
+    DocumentProcessingStatus.PROCESSING,
+    DocumentProcessingStatus.PARSING,
+    DocumentProcessingStatus.INTERRUPTED,
+)
+
+# SQLite does not implement SELECT FOR UPDATE. This keeps local/test acceptance
+# deterministic; PostgreSQL uses the QuotaGuard row lock below.
+_quota_lock = RLock()
+
+
 class DocumentProcessingService:
     def __init__(
         self,
@@ -65,6 +90,10 @@ class DocumentProcessingService:
         upload_url_expires_seconds: int = 900,
         lease_seconds: int = 300,
         max_document_retries: int = 3,
+        workspace_max_active_documents: int = 1,
+        workspace_rolling_24h_page_limit: int = 1200,
+        global_max_processing_documents: int = 1,
+        global_rolling_24h_page_limit: int = 3000,
     ) -> None:
         self._db = db
         self._storage = storage
@@ -75,6 +104,10 @@ class DocumentProcessingService:
         self._upload_url_expires_seconds = upload_url_expires_seconds
         self._lease_seconds = lease_seconds
         self._max_document_retries = max_document_retries
+        self._workspace_max_active_documents = workspace_max_active_documents
+        self._workspace_rolling_24h_page_limit = workspace_rolling_24h_page_limit
+        self._global_max_processing_documents = global_max_processing_documents
+        self._global_rolling_24h_page_limit = global_rolling_24h_page_limit
 
     def create_upload(
         self,
@@ -87,24 +120,34 @@ class DocumentProcessingService:
         size_bytes: int,
         upload_endpoint: str | None,
     ) -> tuple[Document, UploadTarget]:
-        project = self._project(workspace_id, project_id)
         self._validate_upload(filename, content_type, size_bytes)
-        document_id = uuid.uuid4()
-        object_key = build_object_key(workspace_id, document_id)
-        document = Document(
-            id=document_id,
-            project_id=project.id,
-            kind=kind,
-            original_name=filename,
-            mime_type=content_type,
-            size_bytes=size_bytes,
-            storage_key=object_key,
-            storage_backend=self._storage.backend_name,
-            processing_status=DocumentProcessingStatus.UPLOADED,
-            processing_phase="uploading",
-        )
-        self._db.add(document)
-        self._db.commit()
+        with _quota_lock:
+            self._lock_quota_guard()
+            workspace = self._db.scalar(select(Workspace).where(Workspace.id == workspace_id).with_for_update())
+            if workspace is None:
+                self._db.rollback()
+                raise DocumentProjectNotFoundError("工作区不存在")
+            project = self._project(workspace_id, project_id)
+            active_count = self._active_document_count(workspace_id)
+            if active_count >= self._workspace_max_active_documents:
+                self._db.rollback()
+                raise DocumentQuotaError("当前已有一份资料正在排队或处理中，请完成后再上传。")
+            document_id = uuid.uuid4()
+            object_key = build_object_key(workspace_id, document_id)
+            document = Document(
+                id=document_id,
+                project_id=project.id,
+                kind=kind,
+                original_name=filename,
+                mime_type=content_type,
+                size_bytes=size_bytes,
+                storage_key=object_key,
+                storage_backend=self._storage.backend_name,
+                processing_status=DocumentProcessingStatus.UPLOADED,
+                processing_phase="uploading",
+            )
+            self._db.add(document)
+            self._db.commit()
         resolved_upload_endpoint = (
             upload_endpoint.format(document_id=document_id) if upload_endpoint is not None else None
         )
@@ -137,18 +180,65 @@ class DocumentProcessingService:
             raise DocumentProcessingError("上传文件不存在或上传尚未完成")
         actual_size = self._storage.object_size(document.storage_key)
         if actual_size > self._max_upload_bytes:
-            self._storage.delete_object(document.storage_key)
-            document.processing_status = DocumentProcessingStatus.FAILED
-            document.processing_phase = "failed"
-            document.error_message = f"PDF 文件不能超过 {self._max_upload_bytes // (1024 * 1024)}MB"
-            self._db.commit()
-            raise DocumentProcessingError(document.error_message)
+            self._reject_uploaded_object(
+                document, f"PDF 文件不能超过 {self._max_upload_bytes // (1024 * 1024)}MB"
+            )
         if actual_size != document.size_bytes:
-            raise DocumentProcessingError("上传文件大小与创建上传任务时不一致")
-        document.processing_status = DocumentProcessingStatus.QUEUED
-        document.processing_phase = "queued"
-        document.error_message = None
-        self._db.commit()
+            self._reject_uploaded_object(document, "上传文件大小与创建上传任务时不一致")
+        with _quota_lock:
+            self._lock_quota_guard()
+            self._db.scalar(select(Workspace).where(Workspace.id == workspace_id).with_for_update())
+            if self._active_document_count(workspace_id, exclude_document_id=document.id) >= self._workspace_max_active_documents:
+                self._reject_uploaded_object(
+                    document,
+                    "当前已有一份资料正在排队或处理中，请完成后再上传。",
+                    quota=True,
+                )
+            self._db.commit()
+        local_path: Path | None = None
+        try:
+            local_path = self._storage.download_to_temp(document.storage_key)
+            try:
+                with fitz.open(local_path) as pdf:
+                    total_pages = self._parser.validate_document(pdf)
+            except PDFParsingError as exc:
+                self._reject_uploaded_object(document, str(exc))
+            except Exception as exc:
+                self._reject_uploaded_object(document, "上传的文件不是有效 PDF")
+                raise DocumentProcessingError("上传的文件不是有效 PDF") from exc
+        finally:
+            if local_path is not None:
+                self._storage.release_temp(local_path)
+
+        now = datetime.now(UTC)
+        cutoff = now - timedelta(hours=24)
+        with _quota_lock:
+            self._lock_quota_guard()
+            self._db.scalar(select(Workspace).where(Workspace.id == workspace_id).with_for_update())
+            if self._active_document_count(workspace_id, exclude_document_id=document.id) >= self._workspace_max_active_documents:
+                self._reject_uploaded_object(document, "当前已有一份资料正在排队或处理中，请完成后再上传。", quota=True)
+            workspace_pages = self._rolling_page_total(cutoff, workspace_id=workspace_id)
+            if workspace_pages + total_pages > self._workspace_rolling_24h_page_limit:
+                self._reject_uploaded_object(
+                    document,
+                    f"你最近24小时已处理{workspace_pages}页资料，接受本文件后将超过{self._workspace_rolling_24h_page_limit}页，请稍后再试。",
+                    quota=True,
+                )
+            global_pages = self._rolling_page_total(cutoff)
+            if global_pages + total_pages > self._global_rolling_24h_page_limit:
+                self._reject_uploaded_object(
+                    document,
+                    "当前全站任务较多，最近24小时处理额度已用完，请稍后再试。",
+                    quota=True,
+                )
+            document.total_pages = total_pages
+            document.quota_pages = total_pages
+            document.accepted_at = now
+            document.queued_at = now
+            document.processing_status = DocumentProcessingStatus.QUEUED
+            document.processing_phase = "queued"
+            document.error_message = None
+            self._db.commit()
         self._db.refresh(document)
         return document
 
@@ -183,9 +273,10 @@ class DocumentProcessingService:
         *,
         owner: str | None = None,
         interrupt_after_page: int | None = None,
+        lease_acquired: bool = False,
     ) -> Document:
         lease_owner = owner or str(uuid.uuid4())
-        if not self.acquire_lease(document_id, lease_owner):
+        if not lease_acquired and not self.acquire_lease(document_id, lease_owner):
             document = self._db.get(Document, document_id)
             if document is not None and document.processing_status == DocumentProcessingStatus.PARSED:
                 return document
@@ -276,51 +367,112 @@ class DocumentProcessingService:
     def acquire_lease(self, document_id: uuid.UUID, owner: str) -> bool:
         now = datetime.now(UTC)
         expires = now + timedelta(seconds=self._lease_seconds)
-        statement = (
-            update(Document)
-            .where(
-                Document.id == document_id,
-                Document.processing_status.in_([
-                    DocumentProcessingStatus.QUEUED,
-                    DocumentProcessingStatus.PROCESSING,
-                    DocumentProcessingStatus.PARSING,
-                    DocumentProcessingStatus.INTERRUPTED,
-                ]),
-                or_(Document.lease_owner.is_(None), Document.lease_expires_at < now, Document.lease_owner == owner),
-            )
-            .values(
-                lease_owner=owner,
-                lease_expires_at=expires,
-                processing_status=DocumentProcessingStatus.PROCESSING,
-            )
-        )
-        result = self._db.execute(statement)
-        self._db.commit()
-        return bool(result.rowcount)
-
-    def resume_incomplete(self) -> list[uuid.UUID]:
-        document_ids = list(
-            self._db.scalars(
-                select(Document.id).where(
+        with _quota_lock:
+            self._lock_quota_guard()
+            processing_count = int(self._db.scalar(
+                select(func.count(Document.id)).where(
+                    Document.id != document_id,
+                    Document.processing_status.in_([
+                        DocumentProcessingStatus.PROCESSING,
+                        DocumentProcessingStatus.PARSING,
+                    ]),
+                    Document.lease_expires_at >= now,
+                )
+            ) or 0)
+            if processing_count >= self._global_max_processing_documents:
+                self._db.rollback()
+                return False
+            statement = (
+                update(Document)
+                .where(
+                    Document.id == document_id,
                     Document.processing_status.in_([
                         DocumentProcessingStatus.QUEUED,
                         DocumentProcessingStatus.PROCESSING,
                         DocumentProcessingStatus.PARSING,
                         DocumentProcessingStatus.INTERRUPTED,
-                    ])
+                    ]),
+                    or_(Document.lease_owner.is_(None), Document.lease_expires_at < now, Document.lease_owner == owner),
                 )
-            ).all()
-        )
+                .values(
+                    lease_owner=owner,
+                    lease_expires_at=expires,
+                    processing_status=DocumentProcessingStatus.PROCESSING,
+                    processing_started_at=func.coalesce(Document.processing_started_at, now),
+                )
+            )
+            result = self._db.execute(statement)
+            self._db.commit()
+            return bool(result.rowcount)
+
+    def claim_next(self, owner: str) -> uuid.UUID | None:
+        """Atomically claim the oldest resumable document across all workspaces."""
+        now = datetime.now(UTC)
+        with _quota_lock:
+            self._lock_quota_guard()
+            active = int(self._db.scalar(
+                select(func.count(Document.id)).where(
+                    Document.processing_status.in_([
+                        DocumentProcessingStatus.PROCESSING,
+                        DocumentProcessingStatus.PARSING,
+                    ]),
+                    Document.lease_expires_at >= now,
+                )
+            ) or 0)
+            if active >= self._global_max_processing_documents:
+                self._db.rollback()
+                return None
+            candidate = self._db.scalar(
+                select(Document)
+                .where(
+                    Document.processing_status.in_(QUEUE_DOCUMENT_STATUSES),
+                    or_(Document.lease_owner.is_(None), Document.lease_expires_at < now),
+                )
+                .order_by(Document.accepted_at.asc(), Document.created_at.asc())
+                .with_for_update(skip_locked=True)
+                .limit(1)
+            )
+            if candidate is None:
+                self._db.rollback()
+                return None
+            candidate.lease_owner = owner
+            candidate.lease_expires_at = now + timedelta(seconds=self._lease_seconds)
+            candidate.processing_status = DocumentProcessingStatus.PROCESSING
+            candidate.processing_started_at = candidate.processing_started_at or now
+            if candidate.processed_pages:
+                candidate.processing_phase = "resuming"
+                candidate.current_page = min(candidate.total_pages, candidate.processed_pages + 1)
+            self._db.commit()
+            return candidate.id
+
+    def resume_incomplete(self) -> list[uuid.UUID]:
         completed: list[uuid.UUID] = []
-        for document_id in document_ids:
+        while True:
+            owner = str(uuid.uuid4())
+            document_id = self.claim_next(owner)
+            if document_id is None:
+                break
             try:
-                self.process_document(document_id)
+                self.process_document(document_id, owner=owner, lease_acquired=True)
                 completed.append(document_id)
             except LeaseUnavailableError:
                 continue
             except DocumentProcessingError:
                 continue
         return completed
+
+    def queue_position(self, document: Document) -> int | None:
+        if document.processing_status not in {DocumentProcessingStatus.QUEUED, DocumentProcessingStatus.INTERRUPTED}:
+            return None
+        ordered = list(self._db.scalars(
+            select(Document.id)
+            .where(Document.processing_status.in_([DocumentProcessingStatus.QUEUED, DocumentProcessingStatus.INTERRUPTED]))
+            .order_by(Document.accepted_at.asc(), Document.created_at.asc())
+        ).all())
+        try:
+            return ordered.index(document.id) + 1
+        except ValueError:
+            return None
 
     async def process_upload(
         self,
@@ -489,6 +641,8 @@ class DocumentProcessingService:
         document.error_message = self._safe_error(exc)
         document.lease_owner = None
         document.lease_expires_at = None
+        if document.processing_status == DocumentProcessingStatus.FAILED:
+            self._release_quota_once(document)
         self._db.commit()
 
     def _count_pages(self, document_id: uuid.UUID, status: DocumentPageStatus) -> int:
@@ -507,6 +661,64 @@ class DocumentProcessingService:
                 DocumentPage.extraction_method == ExtractionMethod.OCR,
             )
         ) or 0)
+
+    def _lock_quota_guard(self) -> QuotaGuard:
+        guard = self._db.scalar(select(QuotaGuard).where(QuotaGuard.id == 1).with_for_update())
+        if guard is None:
+            guard = QuotaGuard(id=1)
+            self._db.add(guard)
+            self._db.flush()
+        return guard
+
+    def _active_document_count(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        exclude_document_id: uuid.UUID | None = None,
+    ) -> int:
+        query = (
+            select(func.count(Document.id))
+            .join(Project, Document.project_id == Project.id)
+            .where(Project.workspace_id == workspace_id, Document.processing_status.in_(ACTIVE_DOCUMENT_STATUSES))
+        )
+        if exclude_document_id is not None:
+            query = query.where(Document.id != exclude_document_id)
+        return int(self._db.scalar(query) or 0)
+
+    def _rolling_page_total(self, cutoff: datetime, workspace_id: uuid.UUID | None = None) -> int:
+        query = (
+            select(func.coalesce(func.sum(Document.quota_pages), 0))
+            .join(Project, Document.project_id == Project.id)
+            .where(
+                Document.accepted_at >= cutoff,
+                Document.quota_released_at.is_(None),
+            )
+        )
+        if workspace_id is not None:
+            query = query.where(Project.workspace_id == workspace_id)
+        return int(self._db.scalar(query) or 0)
+
+    def _reject_uploaded_object(self, document: Document, message: str, *, quota: bool = False) -> None:
+        if document.storage_key:
+            self._storage.delete_object(document.storage_key)
+            document.storage_key = None
+        document.processing_status = DocumentProcessingStatus.FAILED
+        document.processing_phase = "failed"
+        document.error_message = message
+        document.quota_pages = 0
+        document.accepted_at = None
+        document.queued_at = None
+        self._db.commit()
+        if quota:
+            raise DocumentQuotaError(message)
+        raise DocumentProcessingError(message)
+
+    @staticmethod
+    def _release_quota_once(document: Document) -> bool:
+        if document.processed_pages != 0 or document.quota_pages <= 0 or document.quota_released_at is not None:
+            return False
+        document.quota_released_at = datetime.now(UTC)
+        return True
 
     def _project(self, workspace_id: uuid.UUID, project_id: uuid.UUID) -> Project:
         project = self._db.scalar(
@@ -550,12 +762,9 @@ class DocumentTaskRunner:
         self._session_factory = session_factory
         self._service_factory = service_factory
 
-    def run(self, document_id: uuid.UUID) -> None:
-        with self._session_factory() as db:
-            try:
-                self._service_factory(db).process_document(document_id)
-            except (DocumentProcessingError, LeaseUnavailableError):
-                return
+    def run(self, document_id: uuid.UUID | None = None) -> None:
+        """Compatibility entry point; the queue, not a caller-supplied id, decides order."""
+        self.resume_incomplete()
 
     def resume_incomplete(self) -> list[uuid.UUID]:
         with self._session_factory() as db:
