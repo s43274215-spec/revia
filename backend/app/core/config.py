@@ -13,6 +13,14 @@ class Settings(BaseSettings):
     environment: str = "development"
     database_url: str = "sqlite+pysqlite:///./storage/revia.db"
     file_storage_root: str = "./storage"
+    storage_backend: Literal["local", "r2"] = "local"
+    r2_account_id: str = ""
+    r2_access_key_id: str = ""
+    r2_secret_access_key: str = ""
+    r2_bucket_name: str = ""
+    r2_endpoint: str = ""
+    upload_url_expires_seconds: int = 900
+    document_lease_seconds: int = 300
     cors_origins: Annotated[list[str], NoDecode] = [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
@@ -33,8 +41,8 @@ class Settings(BaseSettings):
     ocr_enabled: bool = True
     ocr_dpi: int = 144
     ocr_minimum_text_length: int = 8
-    max_upload_mb: int = 25
-    max_pdf_pages: int = 120
+    max_upload_mb: int = 150
+    max_pdf_pages: int = 500
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -77,6 +85,8 @@ class Settings(BaseSettings):
             raise ValueError("CREDENTIAL_ENCRYPTION_KEY must be a valid Fernet key") from exc
         if self.max_upload_mb <= 0 or self.max_pdf_pages <= 0:
             raise ValueError("Upload limits must be positive integers")
+        if self.upload_url_expires_seconds <= 0 or self.document_lease_seconds <= 0:
+            raise ValueError("Upload URL and document lease durations must be positive")
         if self.environment.casefold() == "production":
             required = {
                 "APP_ACCESS_CODE": self.app_access_code,
@@ -98,6 +108,18 @@ class Settings(BaseSettings):
                 raise ValueError("Production access and signing secrets must be explicitly configured")
             if self.credential_encryption_key == "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=":
                 raise ValueError("Production CREDENTIAL_ENCRYPTION_KEY must be explicitly configured")
+            if self.storage_backend != "r2":
+                raise ValueError("Production STORAGE_BACKEND must be r2")
+            r2_required = {
+                "R2_ACCOUNT_ID": self.r2_account_id,
+                "R2_ACCESS_KEY_ID": self.r2_access_key_id,
+                "R2_SECRET_ACCESS_KEY": self.r2_secret_access_key,
+                "R2_BUCKET_NAME": self.r2_bucket_name,
+                "R2_ENDPOINT": self.r2_endpoint,
+            }
+            r2_missing = [name for name, value in r2_required.items() if not value]
+            if r2_missing:
+                raise ValueError(f"Production R2 configuration is missing: {', '.join(r2_missing)}")
         return self
 
 

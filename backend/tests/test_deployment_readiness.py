@@ -3,9 +3,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from cryptography.fernet import Fernet
 from pydantic import ValidationError
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -16,6 +18,7 @@ from app.core.config import Settings, get_settings
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
+from app.services.storage import build_object_key, build_storage_provider
 
 
 class AccessControlTests(unittest.TestCase):
@@ -82,6 +85,42 @@ class ProductionConfigurationTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             Settings(_env_file=None, environment="production")
 
+    def test_production_requires_r2_and_accepts_complete_private_storage_configuration(self) -> None:
+        common = {
+            "environment": "production",
+            "database_url": "postgresql://user:pass@neon.example/revia",
+            "cors_origins": ["https://revia.vercel.app"],
+            "app_access_code": "private-access",
+            "session_signing_key": "production-signing-key-with-more-than-32-bytes",
+            "credential_encryption_key": Fernet.generate_key().decode(),
+            "ai_mode": "live",
+        }
+        with self.assertRaisesRegex(ValidationError, "STORAGE_BACKEND"):
+            Settings(_env_file=None, **common)
+        settings = Settings(
+            _env_file=None,
+            **common,
+            storage_backend="r2",
+            r2_account_id="account",
+            r2_access_key_id="access-id",
+            r2_secret_access_key="synthetic-secret",
+            r2_bucket_name="private-revia",
+            r2_endpoint="https://account.r2.cloudflarestorage.com",
+        )
+        self.assertEqual(settings.storage_backend, "r2")
+        provider = build_storage_provider(settings)
+        workspace_id = uuid.uuid4()
+        document_id = uuid.uuid4()
+        target = provider.create_upload_url(
+            build_object_key(workspace_id, document_id),
+            workspace_id=workspace_id,
+            document_id=document_id,
+            content_type="application/pdf",
+            expires_in=60,
+        )
+        self.assertIn("X-Amz-Signature", target.url)
+        self.assertIn("X-Amz-Expires=60", target.url)
+
 
 class AlembicMigrationTests(unittest.TestCase):
     def test_empty_database_upgrades_twice_and_matches_metadata(self) -> None:
@@ -105,12 +144,14 @@ class AlembicMigrationTests(unittest.TestCase):
                 self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
 
             engine = create_engine(database_url)
-            with engine.connect() as connection:
-                revision = connection.exec_driver_sql("select version_num from alembic_version").scalar_one()
-                table_names = set(connection.dialect.get_table_names(connection))
-            self.assertEqual(revision, "20260715_0001")
-            self.assertEqual(table_names - {"alembic_version"}, set(Base.metadata.tables))
-            engine.dispose()
+            try:
+                with engine.connect() as connection:
+                    revision = connection.exec_driver_sql("select version_num from alembic_version").scalar_one()
+                    table_names = set(connection.dialect.get_table_names(connection))
+                self.assertEqual(revision, "20260716_0002")
+                self.assertEqual(table_names - {"alembic_version"}, set(Base.metadata.tables))
+            finally:
+                engine.dispose()
 
 
 if __name__ == "__main__":

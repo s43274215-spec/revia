@@ -13,8 +13,21 @@ export type SelectedPDF = {
 export function FileDropZone({ title, hint, kind, multiple = false, files, onFiles }: { title: string; hint: string; kind: SelectedPDF["kind"]; multiple?: boolean; files: SelectedPDF[]; onFiles: (files: SelectedPDF[]) => void }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
+  const [validationError, setValidationError] = useState<string | null>(null);
   const accept = (selected: FileList | File[]) => {
-    const pdfs = Array.from(selected).filter((file) => file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf"));
+    const candidates = Array.from(selected);
+    const invalidType = candidates.find((file) => file.type !== "application/pdf" || !file.name.toLowerCase().endsWith(".pdf"));
+    if (invalidType) {
+      setValidationError("仅支持 MIME 类型为 application/pdf 的 .pdf 文件");
+      return;
+    }
+    const oversized = candidates.find((file) => file.size > 150 * 1024 * 1024);
+    if (oversized) {
+      setValidationError("PDF 文件不能超过 150MB");
+      return;
+    }
+    setValidationError(null);
+    const pdfs = candidates;
     const mapped = pdfs.map((file, index) => ({ id: `${kind}-${Date.now()}-${index}`, name: file.name, size: file.size, kind, file }));
     onFiles(multiple ? [...files, ...mapped] : mapped.slice(0, 1));
   };
@@ -27,6 +40,7 @@ export function FileDropZone({ title, hint, kind, multiple = false, files, onFil
       <strong>{title}</strong>
       <p>{hint}</p>
       <button type="button" onClick={() => inputRef.current?.click()}>选择 PDF</button>
+      {validationError && <p className="file-validation-error" role="alert">{validationError}</p>}
       {files.length > 0 && <div className="selected-files">
         {files.map((file) => <div key={file.id}><span>PDF</span><p><strong>{file.name}</strong><small>{(file.size / 1024 / 1024).toFixed(2)} MB</small></p></div>)}
       </div>}

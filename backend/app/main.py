@@ -1,10 +1,15 @@
+import asyncio
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.router import api_router
+from app.api.v1.endpoints.documents import build_document_processing_service
 from app.core.config import get_settings
+from app.db.session import SessionLocal
+from app.services.document_processing import DocumentTaskRunner
 
 settings = get_settings()
 
@@ -21,7 +26,22 @@ def configure_ai_audit_log() -> None:
 
 
 configure_ai_audit_log()
-app = FastAPI(title=settings.app_name, version="0.1.0")
+
+
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    runner = DocumentTaskRunner(
+        SessionLocal,
+        lambda db: build_document_processing_service(db, settings),
+    )
+    application.state.document_task_runner = runner
+    resume_task = asyncio.create_task(asyncio.to_thread(runner.resume_incomplete))
+    yield
+    if not resume_task.done():
+        resume_task.cancel()
+
+
+app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,

@@ -5,6 +5,7 @@ from typing import Protocol
 import fitz
 
 from app.document.ocr import OCRUnavailableError, RapidOCREngine
+from app.models.enums import ExtractionMethod
 
 
 class PDFParsingError(RuntimeError):
@@ -15,6 +16,13 @@ class PDFParsingError(RuntimeError):
 class ParsedPageData:
     page_number: int
     text: str
+
+
+@dataclass(frozen=True)
+class ExtractedPageData:
+    page_number: int
+    text: str
+    extraction_method: ExtractionMethod
 
 
 @dataclass(frozen=True)
@@ -52,33 +60,22 @@ class PDFParser:
     def parse(self, path: Path) -> ParsedPDF:
         try:
             with fitz.open(path) as document:
-                if not document.is_pdf:
-                    raise PDFParsingError("Uploaded file is not a PDF")
-                if document.page_count > self._max_pages:
-                    raise PDFParsingError(f"PDF 页数不能超过 {self._max_pages} 页")
-                extracted = [self._normalize_text(page.get_text("text", sort=True)) for page in document]
-                image_pages = [bool(page.get_images(full=True)) for page in document]
-                valid_text_pages = sum(len(text) >= self._minimum_text_length for text in extracted)
-                is_scanned = valid_text_pages == 0 and any(image_pages)
+                self.validate_document(document)
                 pages: list[ParsedPageData] = []
                 ocr_page_count = 0
                 ocr_failures: list[str] = []
                 for index, page in enumerate(document):
-                    text = extracted[index]
-                    needs_ocr = len(text) < self._minimum_text_length and image_pages[index]
-                    if needs_ocr:
-                        if not self._ocr_enabled:
-                            raise PDFParsingError("检测到扫描版 PDF，需要启用 OCR。")
-                        try:
+                    try:
+                        extracted_page = self.extract_page(page, index + 1)
+                        if extracted_page.extraction_method == ExtractionMethod.OCR:
                             ocr_page_count += 1
-                            text = self._ocr_page(page)
-                        except OCRUnavailableError as exc:
-                            raise PDFParsingError("检测到扫描版 PDF，需要启用 OCR。") from exc
-                        except Exception as exc:
-                            ocr_failures.append(f"第 {index + 1} 页：{self._safe_error(exc)}")
-                    pages.append(ParsedPageData(page_number=index + 1, text=text))
+                        pages.append(ParsedPageData(page_number=index + 1, text=extracted_page.text))
+                    except PDFParsingError as exc:
+                        ocr_failures.append(f"第 {index + 1} 页：{self._safe_error(exc)}")
+                        raise
 
                 ocr_executed = ocr_page_count > 0
+                is_scanned = ocr_page_count == document.page_count and document.page_count > 0
                 if is_scanned and not any(page.text.strip() for page in pages):
                     detail = "；".join(ocr_failures[:5]) or "OCR 未识别到有效文本"
                     raise PDFParsingError(f"扫描版 PDF OCR 失败：{detail}")
@@ -100,6 +97,36 @@ class PDFParser:
             raise
         except Exception as exc:
             raise PDFParsingError(f"Failed to parse PDF: {path.name}") from exc
+
+    def validate_document(self, document: fitz.Document) -> int:
+        if not document.is_pdf:
+            raise PDFParsingError("上传的文件不是有效 PDF")
+        if document.page_count > self._max_pages:
+            raise PDFParsingError(f"PDF 页数不能超过 {self._max_pages} 页")
+        return document.page_count
+
+    def inspect(self, path: Path) -> int:
+        try:
+            with fitz.open(path) as document:
+                return self.validate_document(document)
+        except PDFParsingError:
+            raise
+        except Exception as exc:
+            raise PDFParsingError(f"无法打开 PDF：{path.name}") from exc
+
+    def extract_page(self, page: fitz.Page, page_number: int) -> ExtractedPageData:
+        text = self._normalize_text(page.get_text("text", sort=True))
+        needs_ocr = len(text) < self._minimum_text_length and bool(page.get_images(full=True))
+        if not needs_ocr:
+            return ExtractedPageData(page_number, text, ExtractionMethod.TEXT)
+        if not self._ocr_enabled:
+            raise PDFParsingError("检测到扫描版 PDF，需要启用 OCR。")
+        try:
+            return ExtractedPageData(page_number, self._ocr_page(page), ExtractionMethod.OCR)
+        except OCRUnavailableError as exc:
+            raise PDFParsingError("检测到扫描版 PDF，需要启用 OCR。") from exc
+        except Exception as exc:
+            raise PDFParsingError(f"第 {page_number} 页 OCR 失败：{self._safe_error(exc)}") from exc
 
     @staticmethod
     def _normalize_text(text: str) -> str:

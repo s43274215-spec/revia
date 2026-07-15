@@ -3,7 +3,38 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict
 
+from app.models.enums import DocumentKind, DocumentPageStatus, ExtractionMethod
 from app.schemas.project import DocumentRead
+
+
+class DocumentUploadCreate(BaseModel):
+    kind: DocumentKind
+    filename: str
+    content_type: str
+    size_bytes: int
+
+
+class DocumentUploadTargetRead(BaseModel):
+    document: DocumentRead
+    upload_url: str
+    method: str
+    headers: dict[str, str]
+    expires_at: int
+
+
+class DocumentPageRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    page_number: int
+    status: DocumentPageStatus
+    extraction_method: ExtractionMethod | None
+    character_count: int
+    error_message: str | None
+    retry_count: int
+
+
+class DocumentProgressRead(DocumentRead):
+    is_resuming: bool = False
 
 
 class ParsedPageRead(BaseModel):

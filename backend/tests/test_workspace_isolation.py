@@ -72,6 +72,17 @@ class WorkspaceIsolationAPITests(unittest.TestCase):
             files={"file": ("private.pdf", build_test_pdf(), "application/pdf")},
         )
         self.assertEqual(upload.status_code, 404)
+        direct_upload = self.client.post(
+            f"/api/v1/projects/{self.project_id}/documents/uploads",
+            headers=self.other_headers,
+            json={
+                "kind": "course_material",
+                "filename": "private.pdf",
+                "content_type": "application/pdf",
+                "size_bytes": len(build_test_pdf()),
+            },
+        )
+        self.assertEqual(direct_upload.status_code, 404)
         syllabus = self.client.put(
             f"/api/v1/projects/{self.project_id}/syllabus",
             headers=self.other_headers,

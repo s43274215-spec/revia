@@ -36,8 +36,15 @@ class DocumentRead(BaseModel):
     original_name: str
     mime_type: str
     size_bytes: int
-    storage_key: str | None
+    storage_backend: str
     processing_status: DocumentProcessingStatus
+    total_pages: int
+    processed_pages: int
+    failed_pages: int
+    ocr_page_count: int
+    current_page: int
+    processing_phase: str
+    retry_count: int
     error_message: str | None
     created_at: datetime
 
@@ -45,6 +52,16 @@ class DocumentRead(BaseModel):
 class SyllabusUpsert(BaseModel):
     text: str | None = None
     document_id: uuid.UUID | None = None
+
+
+class SyllabusRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    project_id: uuid.UUID
+    text: str | None
+    document_id: uuid.UUID | None
+    updated_at: datetime
 
 
 class GenerationJobRead(BaseModel):

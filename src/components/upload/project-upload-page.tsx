@@ -5,10 +5,14 @@ import { useRouter } from "next/navigation";
 import { Icon } from "@/components/learning/icons";
 import {
   BackendProject,
+  DocumentProgress,
   GenerationJob,
   GenerationStatus,
   getBackendProject,
+  getDocumentProgress,
   getGenerationJob,
+  getLatestDocument,
+  getSyllabus,
   getLearningMaterial,
   saveSyllabus,
   startGeneration,
@@ -45,11 +49,12 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
   const [syllabusFiles, setSyllabusFiles] = useState<SelectedPDF[]>([]);
   const [syllabusText, setSyllabusText] = useState("");
   const [generating, setGenerating] = useState(false);
-  const [uploading, setUploading] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [job, setJob] = useState<GenerationJob | null>(null);
   const [visibleStatus, setVisibleStatus] = useState<GenerationStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [documentProgress, setDocumentProgress] = useState<DocumentProgress | null>(null);
+  const [uploadStage, setUploadStage] = useState<"uploading" | "processing" | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -59,6 +64,51 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
       .finally(() => { if (active) setLoadingProject(false); });
     return () => { active = false; };
   }, [projectId]);
+
+  useEffect(() => {
+    let active = true;
+    getSyllabus(projectId)
+      .then((syllabus) => {
+        if (active && syllabus?.text) setSyllabusText(syllabus.text);
+      })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, [projectId]);
+
+  useEffect(() => {
+    let active = true;
+    getLatestDocument(projectId, "course_material")
+      .then((latest) => {
+        if (!active || !latest) return;
+        setDocumentProgress(latest);
+        if (["queued", "processing", "parsing", "interrupted"].includes(latest.processing_status)) {
+          setGenerating(true);
+          setUploadStage("processing");
+        }
+      })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, [projectId]);
+
+  useEffect(() => {
+    if (!documentProgress || !["queued", "processing", "parsing", "interrupted"].includes(documentProgress.processing_status)) return;
+    let active = true;
+    const timer = window.setTimeout(async () => {
+      try {
+        const current = await getDocumentProgress(projectId, documentProgress.id);
+        if (!active) return;
+        setDocumentProgress(current);
+        if (current.processing_status === "failed") setError(current.error_message || "PDF 解析失败");
+        if (current.processing_status === "parsed") {
+          setUploadStage(null);
+          setGenerating(false);
+        }
+      } catch (reason) {
+        if (active) setError(reason instanceof Error ? reason.message : "无法读取解析进度");
+      }
+    }, 700);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [documentProgress, projectId]);
 
   const openLearningMaterial = useCallback(async (finishedJob: GenerationJob) => {
     if (finishedJob.status !== "completed" && finishedJob.status !== "partial_failed") return;
@@ -100,7 +150,8 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
     };
   }, [job, openLearningMaterial, projectId]);
 
-  const canGenerate = courseFiles.length > 0 && (syllabusFiles.length > 0 || syllabusText.trim().length > 0);
+  const hasParsedCourse = documentProgress?.kind === "course_material" && documentProgress.processing_status === "parsed";
+  const canGenerate = (courseFiles.length > 0 || hasParsedCourse) && (syllabusFiles.length > 0 || syllabusText.trim().length > 0);
 
   const beginJob = async (regenerate: boolean) => {
     const createdJob = await startGeneration(projectId, regenerate);
@@ -118,20 +169,27 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
     setError(null);
     try {
       if (!submitted) {
-        setUploading(true);
+        setUploadStage("uploading");
+        if (syllabusText.trim()) await saveSyllabus(project.id, syllabusText, null);
         for (const selected of courseFiles) {
-          await uploadPDF(project.id, "course_material", selected.file);
+          await uploadPDF(project.id, "course_material", selected.file, (progress, stage) => {
+            setDocumentProgress(progress);
+            setUploadStage(stage);
+          });
         }
         const syllabusDocumentId = syllabusFiles[0]
-          ? await uploadPDF(project.id, "syllabus", syllabusFiles[0].file)
+          ? await uploadPDF(project.id, "syllabus", syllabusFiles[0].file, (progress, stage) => {
+              setDocumentProgress(progress);
+              setUploadStage(stage);
+            })
           : null;
         await saveSyllabus(project.id, syllabusText, syllabusDocumentId);
         setSubmitted(true);
-        setUploading(false);
+        setUploadStage(null);
       }
       await beginJob(Boolean(job?.status === "failed" || submitted));
     } catch (reason) {
-      setUploading(false);
+      setUploadStage(null);
       setError(reason instanceof Error ? reason.message : "生成流程启动失败");
     }
   };
@@ -139,10 +197,22 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
   if (loadingProject) return <main className="entry-page entry-loading">正在读取项目…</main>;
   if (!project) return <main className="entry-page missing-project"><h1>未找到项目</h1><button onClick={() => router.push("/")}>返回项目列表</button></main>;
 
-  const statusLabel = uploading ? "正在解析课程资料" : visibleStatus ? progressLabels[visibleStatus] : "正在提交学习资料";
-  const progressDetail = job && job.total_items > 0
-    ? `已处理 ${job.processed_items} / ${job.total_items} 项 · ${job.progress}%`
-    : "正在上传、解析并组织学习内容，请稍候。";
+  const statusLabel = uploadStage === "uploading"
+    ? "正在上传完整 PDF"
+    : documentProgress?.processing_phase === "structuring"
+      ? "正在整理内容结构"
+      : documentProgress?.is_resuming
+        ? `正在从第 ${Math.max(1, documentProgress.current_page)} 页继续`
+        : uploadStage === "processing"
+          ? `正在解析第 ${documentProgress?.current_page || 0} / ${documentProgress?.total_pages || "?"} 页`
+          : visibleStatus
+            ? progressLabels[visibleStatus]
+            : "正在提交学习资料";
+  const progressDetail = uploadStage && documentProgress
+    ? `已完成文本提取 ${documentProgress.processed_pages} 页 · OCR ${documentProgress.ocr_page_count} 页 · 当前阶段：${documentProgress.processing_phase === "structuring" ? "内容整理" : "解析"}`
+    : job && job.total_items > 0
+      ? `已处理 ${job.processed_items} / ${job.total_items} 项 · ${job.progress}%`
+      : "正在上传、解析并组织学习内容，请稍候。";
   const partialJob = job?.status === "partial_failed" ? job : null;
   const completedItemCount = partialJob
     ? Math.max(0, partialJob.total_items - partialJob.item_failures.length)
@@ -158,8 +228,8 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
         <button className="back-link" onClick={() => router.push("/")}>← 返回项目列表</button>
         <div className="upload-heading"><span className="entry-eyebrow">准备学习资料</span><h1>{project.name}</h1><p>上传课程资料并填写考纲，Revia 将据此生成结构化复习材料。</p></div>
         <div className="upload-section">
-          <div className="upload-section-label"><span>01</span><div><h2>上传课程资料</h2><p>支持一份或多份 PDF 课程资料。</p></div></div>
-          <FileDropZone title="拖拽课程资料到这里" hint="或点击选择文件，仅支持 PDF" kind="course_material" multiple files={courseFiles} onFiles={setCourseFiles} />
+          <div className="upload-section-label"><span>01</span><div><h2>上传课程资料</h2><p>上传单个完整 PDF，最多 150MB；生产环境最多解析 500 页。</p></div></div>
+          <FileDropZone title="拖拽完整课程资料到这里" hint="或点击选择文件，仅支持单个 PDF" kind="course_material" files={courseFiles} onFiles={setCourseFiles} />
         </div>
         <div className="upload-section">
           <div className="upload-section-label"><span>02</span><div><h2>填写考试范围</h2><p>上传考纲 PDF，或直接输入考纲内容。</p></div></div>

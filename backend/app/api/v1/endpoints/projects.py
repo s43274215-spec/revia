@@ -6,8 +6,10 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.auth.dependencies import WorkspaceId
+from app.core.config import Settings, get_settings
 from app.schemas.project import ProjectCreate, ProjectRead, ProjectUpdate
 from app.services.projects import ProjectNotFoundError, ProjectService
+from app.services.storage import build_storage_provider
 
 router = APIRouter()
 DbSession = Annotated[Session, Depends(get_db)]
@@ -40,9 +42,18 @@ def update_project(project_id: uuid.UUID, payload: ProjectUpdate, workspace_id: 
 
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_project(project_id: uuid.UUID, workspace_id: WorkspaceId, db: DbSession) -> Response:
+def delete_project(
+    project_id: uuid.UUID,
+    workspace_id: WorkspaceId,
+    db: DbSession,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> Response:
     try:
-        ProjectService(db).delete(workspace_id, project_id)
+        ProjectService(db).delete(
+            workspace_id,
+            project_id,
+            delete_object=build_storage_provider(settings).delete_object,
+        )
     except ProjectNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)
