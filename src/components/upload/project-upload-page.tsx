@@ -60,12 +60,28 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
 
   useEffect(() => {
     let active = true;
-    getBackendProject(projectId)
-      .then((current) => { if (active) setProject(current); })
-      .catch(() => { if (active) setProject(null); })
-      .finally(() => { if (active) setLoadingProject(false); });
+    const restoreProject = async () => {
+      try {
+        const current = await getBackendProject(projectId);
+        if (!active) return;
+        setProject(current);
+        if (current.status === "completed") {
+          try {
+            await getLearningMaterial(projectId);
+            if (active) router.replace(`/projects/${projectId}/learn`);
+          } catch {
+            // Keep the upload page available if the completed project has no readable material.
+          }
+        }
+      } catch {
+        if (active) setProject(null);
+      } finally {
+        if (active) setLoadingProject(false);
+      }
+    };
+    void restoreProject();
     return () => { active = false; };
-  }, [projectId]);
+  }, [projectId, router]);
 
   useEffect(() => {
     let active = true;

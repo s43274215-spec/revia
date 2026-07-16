@@ -23,10 +23,21 @@ export function ProjectDashboard() {
 
   useEffect(() => {
     let active = true;
-    listProjects().then((items) => { if (active) setProjects(items); }).catch((reason: unknown) => {
-      if (active) setError(reason instanceof Error ? reason.message : "无法读取项目列表");
-    });
-    return () => { active = false; };
+    const refreshProjects = () => {
+      listProjects().then((items) => {
+        if (!active) return;
+        setProjects(items);
+        setError(null);
+      }).catch((reason: unknown) => {
+        if (active) setError(reason instanceof Error ? reason.message : "无法读取项目列表");
+      });
+    };
+    refreshProjects();
+    window.addEventListener("focus", refreshProjects);
+    return () => {
+      active = false;
+      window.removeEventListener("focus", refreshProjects);
+    };
   }, []);
 
   const openProject = (project: BackendProject) => router.push(project.status === "completed" ? `/projects/${project.id}/learn` : `/projects/${project.id}/upload`);
