@@ -79,6 +79,10 @@ class PDFParser:
         self._ocr_worker_timeout_seconds = ocr_worker_timeout_seconds
         self._ocr_version: str | None = None
 
+    @property
+    def requires_page_for_ocr(self) -> bool:
+        return self._ocr_engine is not None
+
     def parse(self, path: Path) -> ParsedPDF:
         try:
             with fitz.open(path) as document:
@@ -148,10 +152,35 @@ class PDFParser:
         source_path: Path | None = None,
         allow_ocr: bool = True,
     ) -> ExtractedPageData:
+        text_page = self.extract_text_page(page, page_number)
+        if text_page is not None:
+            return text_page
+        return self.extract_ocr_page(
+            page_number,
+            source_path=source_path,
+            allow_ocr=allow_ocr,
+            page=page,
+        )
+
+    def extract_text_page(
+        self,
+        page: fitz.Page,
+        page_number: int,
+    ) -> ExtractedPageData | None:
         text = self._normalize_text(page.get_text("text", sort=True))
         needs_ocr = len(text) < self._minimum_text_length and bool(page.get_images(full=True))
         if not needs_ocr:
             return ExtractedPageData(page_number, text, ExtractionMethod.TEXT)
+        return None
+
+    def extract_ocr_page(
+        self,
+        page_number: int,
+        *,
+        source_path: Path | None,
+        allow_ocr: bool = True,
+        page: fitz.Page | None = None,
+    ) -> ExtractedPageData:
         if not self._ocr_enabled:
             raise OCRDisabledError("ocr_disabled")
         if not allow_ocr:
@@ -175,8 +204,10 @@ class PDFParser:
     def _normalize_text(text: str) -> str:
         return text.replace("\r\n", "\n").replace("\r", "\n").strip()
 
-    def _ocr_page(self, page: fitz.Page, source_path: Path | None, page_number: int) -> str:
+    def _ocr_page(self, page: fitz.Page | None, source_path: Path | None, page_number: int) -> str:
         if self._ocr_engine is not None:
+            if page is None:
+                raise OCRWorkerError("进程内 OCR 缺少 PDF 页面")
             pixmap = page.get_pixmap(dpi=self._ocr_dpi, colorspace=fitz.csGRAY, alpha=False)
             image: bytes | None = None
             try:

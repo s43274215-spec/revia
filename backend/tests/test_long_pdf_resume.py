@@ -67,7 +67,7 @@ def build_text_pdf(page_count: int) -> bytes:
 
 
 class MockOCRParser(PDFParser):
-    def extract_page(self, page: fitz.Page, page_number: int, **_kwargs) -> ExtractedPageData:
+    def extract_text_page(self, page: fitz.Page, page_number: int) -> ExtractedPageData:
         return ExtractedPageData(
             page_number=page_number,
             text=f"Mock OCR page {page_number} contains scanned course material.",

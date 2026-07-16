@@ -284,6 +284,37 @@ class SlowOCRWorker(SuccessfulOCRWorker):
         return super().recognize_page(path, page_number, dpi)
 
 
+class RecordingOCRWorker(SuccessfulOCRWorker):
+    def __init__(self, *, fail_on_page: int | None = None) -> None:
+        self.calls: list[int] = []
+        self.fail_on_page = fail_on_page
+
+    def recognize_page(self, path: Path, page_number: int, dpi: int) -> OCRPageResult:
+        self.calls.append(page_number)
+        if page_number == self.fail_on_page:
+            raise OCRWorkerResourceError("simulated worker termination")
+        return super().recognize_page(path, page_number, dpi)
+
+
+class ParentPDFReleaseProbeParser(PDFParser):
+    def __init__(self, worker: RecordingOCRWorker) -> None:
+        super().__init__(max_pages=600, ocr_worker=worker)
+        self.parent_document_ids: list[int] = []
+        self.parent_closed_before_ocr: list[bool] = []
+        self._inspected_document = None
+
+    def extract_text_page(self, page: fitz.Page, page_number: int):
+        self._inspected_document = page.parent
+        self.parent_document_ids.append(id(page.parent))
+        return super().extract_text_page(page, page_number)
+
+    def extract_ocr_page(self, page_number: int, **kwargs):
+        assert self._inspected_document is not None
+        self.parent_closed_before_ocr.append(bool(self._inspected_document.is_closed))
+        self._inspected_document = None
+        return super().extract_ocr_page(page_number, **kwargs)
+
+
 class OCRResourceRecoveryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.storage_directory = tempfile.TemporaryDirectory()
@@ -448,6 +479,76 @@ class OCRResourceRecoveryTests(unittest.TestCase):
             completed = self._service(db, ocr_enabled=False).process_document(text_document_id)
             self.assertEqual(completed.processing_status, DocumentProcessingStatus.PARSED)
             self.assertEqual(completed.ocr_page_count, 0)
+
+    def test_parent_pdf_closes_before_ocr_and_resume_reopens_without_duplicates(self) -> None:
+        content = build_scanned_pdf(page_count=2)
+        path = self.storage.resolve(build_object_key(self.workspace_id, self.document_id))
+        path.write_bytes(content)
+        with self.Session() as db:
+            document = db.get(Document, self.document_id)
+            assert document is not None
+            document.size_bytes = len(content)
+            db.commit()
+
+            failing_worker = RecordingOCRWorker(fail_on_page=2)
+            first_parser = ParentPDFReleaseProbeParser(failing_worker)
+            first_service = DocumentProcessingService(
+                db,
+                self.storage,
+                first_parser,
+                TextStructurer(),
+                StructuredTextSplitter(),
+                lease_seconds=30,
+            )
+            with self.assertRaises(DocumentProcessingError):
+                first_service.process_document(self.document_id)
+
+            interrupted = db.get(Document, self.document_id)
+            assert interrupted is not None
+            self.assertEqual(interrupted.processing_status, DocumentProcessingStatus.INTERRUPTED)
+            self.assertEqual(interrupted.processed_pages, 1)
+            self.assertEqual(failing_worker.calls, [1, 2])
+            self.assertEqual(first_parser.parent_closed_before_ocr, [True, True])
+            self.assertEqual(len(set(first_parser.parent_document_ids)), 2)
+
+            interrupted.retry_not_before = datetime.now(UTC) - timedelta(seconds=1)
+            db.commit()
+            resumed_worker = RecordingOCRWorker()
+            resumed_parser = ParentPDFReleaseProbeParser(resumed_worker)
+            resumed_service = DocumentProcessingService(
+                db,
+                self.storage,
+                resumed_parser,
+                TextStructurer(),
+                StructuredTextSplitter(),
+                lease_seconds=30,
+            )
+            completed = resumed_service.process_document(self.document_id)
+            self.assertEqual(completed.processing_status, DocumentProcessingStatus.PARSED)
+            self.assertEqual(completed.processed_pages, 2)
+            self.assertEqual(resumed_worker.calls, [2])
+            self.assertEqual(resumed_parser.parent_closed_before_ocr, [True])
+            self.assertEqual(
+                db.scalar(select(func.count(DocumentPage.id)).where(DocumentPage.document_id == self.document_id)),
+                2,
+            )
+            parsed_id = db.scalar(select(ParsedDocument.id).where(ParsedDocument.document_id == self.document_id))
+            assert parsed_id is not None
+            chunk_count = db.scalar(
+                select(func.count(TextChunk.id)).where(TextChunk.parsed_document_id == parsed_id)
+            )
+            self.assertGreater(chunk_count, 0)
+
+            resumed_service.process_document(self.document_id)
+            self.assertEqual(resumed_worker.calls, [2])
+            self.assertEqual(
+                db.scalar(select(func.count(DocumentPage.id)).where(DocumentPage.document_id == self.document_id)),
+                2,
+            )
+            self.assertEqual(
+                db.scalar(select(func.count(TextChunk.id)).where(TextChunk.parsed_document_id == parsed_id)),
+                chunk_count,
+            )
 
 
 class OCRWebResponsivenessTests(unittest.TestCase):
