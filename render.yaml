@@ -74,6 +74,8 @@ services:
         value: "1"
       - key: OCR_WORKER_TIMEOUT_SECONDS
         value: "180"
+      - key: DOCUMENT_MEMORY_DIAGNOSTICS_ENABLED
+        value: "true"
       - key: MAX_UPLOAD_MB
         value: "150"
       - key: MAX_PDF_PAGES

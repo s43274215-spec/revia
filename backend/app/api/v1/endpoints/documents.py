@@ -67,6 +67,7 @@ def build_document_processing_service(db: Session, settings: Settings) -> Docume
         workspace_rolling_24h_page_limit=settings.workspace_rolling_24h_page_limit,
         global_max_processing_documents=settings.global_max_processing_documents,
         global_rolling_24h_page_limit=settings.global_rolling_24h_page_limit,
+        memory_diagnostics_enabled=settings.document_memory_diagnostics_enabled,
     )
 
 
