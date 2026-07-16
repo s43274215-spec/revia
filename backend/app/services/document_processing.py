@@ -313,11 +313,12 @@ class DocumentProcessingService:
             if document.storage_backend != self._storage.backend_name:
                 raise StorageError("当前存储配置与文档对象不一致，无法恢复解析")
             local_path = self._storage.download_to_temp(document.storage_key)
+            pdf: fitz.Document | None = None
             try:
-                pdf_document = fitz.open(local_path)
+                pdf = fitz.open(local_path)
             except Exception as exc:
                 raise PDFParsingError("上传的文件不是有效 PDF") from exc
-            with pdf_document as pdf:
+            try:
                 total_pages = self._parser.validate_document(pdf)
                 retry_window_page = (
                     document.current_page
@@ -354,17 +355,22 @@ class DocumentProcessingService:
                         document.processing_phase = "extracting"
                     page_record = self._begin_page(document.id, page_number)
                     self._db.commit()
+                    if pdf is None:
+                        pdf = fitz.open(local_path)
                     page = pdf.load_page(page_number - 1)
+                    allow_ocr = (
+                        page_record.retry_count < _OCR_PAGE_RETRY_LIMIT
+                        or page_number == retry_window_page
+                    )
                     try:
-                        extracted = self._parser.extract_page(
-                            page,
-                            page_number,
-                            source_path=local_path,
-                            allow_ocr=(
-                                page_record.retry_count < _OCR_PAGE_RETRY_LIMIT
-                                or page_number == retry_window_page
-                            ),
-                        )
+                        extracted = self._parser.extract_text_page(page, page_number)
+                        if extracted is None and self._parser.requires_page_for_ocr:
+                            extracted = self._parser.extract_ocr_page(
+                                page_number,
+                                source_path=local_path,
+                                allow_ocr=allow_ocr,
+                                page=page,
+                            )
                     except Exception as exc:
                         page_record.status = DocumentPageStatus.FAILED
                         page_record.error_message = self._safe_error(exc)
@@ -374,6 +380,23 @@ class DocumentProcessingService:
                         raise
                     finally:
                         del page
+
+                    if extracted is None:
+                        pdf.close()
+                        pdf = None
+                        try:
+                            extracted = self._parser.extract_ocr_page(
+                                page_number,
+                                source_path=local_path,
+                                allow_ocr=allow_ocr,
+                            )
+                        except Exception as exc:
+                            page_record.status = DocumentPageStatus.FAILED
+                            page_record.error_message = self._safe_error(exc)
+                            page_record.completed_at = datetime.now(UTC)
+                            document.failed_pages = self._count_pages(document.id, DocumentPageStatus.FAILED)
+                            self._db.commit()
+                            raise
 
                     page_record.status = DocumentPageStatus.COMPLETED
                     page_record.extraction_method = extracted.extraction_method
@@ -388,7 +411,9 @@ class DocumentProcessingService:
                     del extracted
                     if interrupt_after_page == page_number:
                         raise SimulatedInterruption(f"模拟在第 {page_number} 页后中断")
-
+            finally:
+                if pdf is not None:
+                    pdf.close()
             return self._finalize_document(document_id, lease_owner)
         except LeaseUnavailableError:
             raise
