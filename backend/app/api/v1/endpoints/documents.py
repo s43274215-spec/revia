@@ -54,6 +54,9 @@ def build_document_processing_service(db: Session, settings: Settings) -> Docume
             ocr_dpi=settings.ocr_dpi,
             minimum_text_length=settings.ocr_minimum_text_length,
             max_pages=settings.max_pdf_pages,
+            ocr_worker_max_rss_mb=settings.ocr_worker_max_rss_mb,
+            ocr_worker_threads=settings.ocr_worker_threads,
+            ocr_worker_timeout_seconds=settings.ocr_worker_timeout_seconds,
         ),
         structurer=TextStructurer(),
         splitter=StructuredTextSplitter(),
@@ -337,6 +340,12 @@ def upsert_syllabus(
 
 
 def _schedule_resume(document: Document, runner: DocumentTaskRunner, background_tasks: BackgroundTasks) -> None:
+    if document.retry_not_before is not None:
+        retry_at = document.retry_not_before
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=UTC)
+        if retry_at > datetime.now(UTC):
+            return
     if document.processing_status in {
         DocumentProcessingStatus.QUEUED,
         DocumentProcessingStatus.PROCESSING,

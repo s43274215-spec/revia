@@ -176,7 +176,7 @@ class AlembicMigrationTests(unittest.TestCase):
                 with engine.connect() as connection:
                     revision = connection.exec_driver_sql("select version_num from alembic_version").scalar_one()
                     table_names = set(connection.dialect.get_table_names(connection))
-                self.assertEqual(revision, "20260716_0004")
+                self.assertEqual(revision, "20260716_0005")
                 self.assertEqual(table_names - {"alembic_version"}, set(Base.metadata.tables))
             finally:
                 engine.dispose()

@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     ocr_enabled: bool = True
     ocr_dpi: int = 144
     ocr_minimum_text_length: int = 8
+    ocr_worker_max_rss_mb: int = 300
+    ocr_worker_threads: int = 1
+    ocr_worker_timeout_seconds: int = 180
     max_upload_mb: int = 150
     max_pdf_pages: int = 600
     workspace_max_active_documents: int = 1
@@ -91,6 +94,8 @@ class Settings(BaseSettings):
             raise ValueError("CREDENTIAL_ENCRYPTION_KEY must be a valid Fernet key") from exc
         if self.max_upload_mb <= 0 or self.max_pdf_pages <= 0:
             raise ValueError("Upload limits must be positive integers")
+        if min(self.ocr_worker_max_rss_mb, self.ocr_worker_threads, self.ocr_worker_timeout_seconds) <= 0:
+            raise ValueError("OCR worker limits must be positive integers")
         if min(
             self.workspace_max_active_documents,
             self.workspace_rolling_24h_page_limit,

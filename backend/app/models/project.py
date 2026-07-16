@@ -55,6 +55,7 @@ class Document(Base):
     processing_phase: Mapped[str] = mapped_column(String(32), nullable=False, default="uploading")
     lease_owner: Mapped[str | None] = mapped_column(String(64), index=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    retry_not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     queue_priority: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)

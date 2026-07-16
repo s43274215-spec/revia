@@ -90,6 +90,9 @@ MATCHING_MAX_CANDIDATES=3
 OCR_ENABLED=true
 OCR_DPI=144
 OCR_MINIMUM_TEXT_LENGTH=8
+OCR_WORKER_MAX_RSS_MB=300
+OCR_WORKER_THREADS=1
+OCR_WORKER_TIMEOUT_SECONDS=180
 MAX_UPLOAD_MB=150
 MAX_PDF_PAGES=600
 WORKSPACE_MAX_ACTIVE_DOCUMENTS=1
@@ -151,7 +154,7 @@ NEXT_PUBLIC_API_BASE_URL=https://<your-render-service>.onrender.com/api/v1
 - 浏览器直接上传完整 PDF 到私有 S3 兼容存储，Render 只逐页下载、提取或 OCR，不接收完整上传流量。
 - 每页结果立即写入 PostgreSQL；Render 休眠或重启后从首个未完成页面继续，不重复 OCR 已完成页面。
 - 当前解析任务不会被抢占；完成后优先领取 Owner 等待任务，再按普通任务接受时间继续队列。
-- OCR 采用 RapidOCR 和 ONNX Runtime CPU，严格逐页处理，不在内存中保留全部页面图像。
+- OCR 采用按需启动的独立 RapidOCR/ONNX Runtime 子进程，单线程串行分带识别；达到 RSS 软阈值后完成当前页并回收 Worker，不在 Web 主进程或内存中保留模型与全部页面图像。
 - TextChunk 保存成功后删除对象存储原文件；未完成解析保留原文件用于恢复。
 
 ## 安全边界

@@ -19,7 +19,7 @@ import app.models  # noqa: F401 - registers every ORM model
 from app.core.config import Settings, get_settings
 from app.db.base import Base
 from app.db.session import get_db
-from app.document.parser import PDFParser, PDFParsingError
+from app.document.parser import OCRDisabledError, PDFParser, PDFParsingError
 from app.document.splitter import StructuredTextSplitter
 from app.document.structure import TextStructurer
 from app.document.splitter import StructuredTextSplitter
@@ -101,7 +101,7 @@ class PDFParserOCRTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "scanned.pdf"
             path.write_bytes(build_scanned_pdf())
-            with self.assertRaisesRegex(PDFParsingError, "检测到扫描版 PDF，需要启用 OCR"):
+            with self.assertRaisesRegex(OCRDisabledError, "ocr_disabled"):
                 PDFParser(ocr_enabled=False).parse(path)
 
 
@@ -298,7 +298,7 @@ class DocumentUploadAPITests(unittest.TestCase):
                 filename="scanned.pdf",
                 headers=Headers({"content-type": "application/pdf"}),
             )
-            with self.assertRaisesRegex(DocumentProcessingError, "检测到扫描版 PDF，需要启用 OCR"):
+            with self.assertRaisesRegex(DocumentProcessingError, "ocr_disabled"):
                 asyncio.run(service.process_upload(
                     self.workspace_id,
                     self.project_id,
@@ -307,7 +307,9 @@ class DocumentUploadAPITests(unittest.TestCase):
                 ))
             failed = session.query(Document).filter_by(project_id=self.project_id).one()
             self.assertEqual(failed.processing_status, DocumentProcessingStatus.INTERRUPTED)
-            self.assertIn("检测到扫描版 PDF，需要启用 OCR", failed.error_message or "")
+            self.assertEqual(failed.processing_phase, "resource_limited")
+            self.assertEqual(failed.error_message, "ocr_disabled")
+            self.assertIsNotNone(failed.retry_not_before)
             self.assertIsNotNone(failed.storage_key)
             self.assertEqual(len(list(Path(self.storage.name).rglob("*.pdf"))), 1)
 

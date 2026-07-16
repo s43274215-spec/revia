@@ -68,6 +68,12 @@ services:
         value: "144"
       - key: OCR_MINIMUM_TEXT_LENGTH
         value: "8"
+      - key: OCR_WORKER_MAX_RSS_MB
+        value: "300"
+      - key: OCR_WORKER_THREADS
+        value: "1"
+      - key: OCR_WORKER_TIMEOUT_SECONDS
+        value: "180"
       - key: MAX_UPLOAD_MB
         value: "150"
       - key: MAX_PDF_PAGES

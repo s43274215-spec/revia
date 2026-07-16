@@ -201,6 +201,8 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
 
   const statusLabel = uploadStage === "uploading"
     ? "正在上传完整 PDF"
+    : documentProgress?.processing_phase === "resource_limited"
+      ? "OCR 处理因服务器资源不足暂停，系统稍后可从当前页继续。"
     : documentProgress?.processing_status === "queued"
       ? role === "owner"
         ? "站长任务 · 已进入优先队列"
@@ -215,7 +217,7 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
             ? progressLabels[visibleStatus]
             : "正在提交学习资料";
   const progressDetail = uploadStage && documentProgress
-    ? `已完成文本提取 ${documentProgress.processed_pages} 页 · OCR ${documentProgress.ocr_page_count} 页 · 当前阶段：${documentProgress.processing_phase === "structuring" ? "内容整理" : "解析"}`
+    ? `已完成文本提取 ${documentProgress.processed_pages} 页 · OCR ${documentProgress.ocr_page_count} 页 · 当前阶段：${documentProgress.processing_phase === "structuring" ? "内容整理" : documentProgress.processing_phase === "resource_limited" ? "等待资源恢复" : "解析"}`
     : job && job.total_items > 0
       ? `已处理 ${job.processed_items} / ${job.total_items} 项 · ${job.progress}%`
       : "正在上传、解析并组织学习内容，请稍候。";
