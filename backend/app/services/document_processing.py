@@ -19,6 +19,7 @@ from app.document.parser import (
     ParsedPDF,
     ParsedPageData,
 )
+from app.core.document_memory_diagnostics import DocumentMemoryDiagnostics
 from app.document.splitter import StructuredTextSplitter
 from app.document.structure import TextStructurer
 from app.models.document import DocumentPage, ParsedDocument, ParsedPage, TextChunk
@@ -107,6 +108,7 @@ class DocumentProcessingService:
         workspace_rolling_24h_page_limit: int = 1200,
         global_max_processing_documents: int = 1,
         global_rolling_24h_page_limit: int = 3000,
+        memory_diagnostics_enabled: bool = False,
     ) -> None:
         self._db = db
         self._storage = storage
@@ -121,6 +123,7 @@ class DocumentProcessingService:
         self._workspace_rolling_24h_page_limit = workspace_rolling_24h_page_limit
         self._global_max_processing_documents = global_max_processing_documents
         self._global_rolling_24h_page_limit = global_rolling_24h_page_limit
+        self._memory_diagnostics_enabled = memory_diagnostics_enabled
 
     def create_upload(
         self,
@@ -304,7 +307,12 @@ class DocumentProcessingService:
                 return document
             raise LeaseUnavailableError("文档正在由其他进程处理")
         local_path: Path | None = None
+        diagnostics = DocumentMemoryDiagnostics(
+            self._db,
+            enabled=self._memory_diagnostics_enabled,
+        )
         try:
+            diagnostics.start()
             document = self._db.get(Document, document_id)
             if document is None:
                 raise DocumentNotFoundError("文档不存在")
@@ -409,6 +417,7 @@ class DocumentProcessingService:
                     document.ocr_page_count = self._count_ocr_pages(document.id)
                     self._db.commit()
                     del extracted
+                    diagnostics.page_completed(page_number, total_pages)
                     if interrupt_after_page == page_number:
                         raise SimulatedInterruption(f"模拟在第 {page_number} 页后中断")
             finally:
@@ -423,6 +432,7 @@ class DocumentProcessingService:
                 raise DocumentProcessingError(str(exc)) from exc
             raise DocumentProcessingError("PDF 逐页解析失败") from exc
         finally:
+            diagnostics.close()
             self._parser.close()
             if local_path is not None:
                 self._storage.release_temp(local_path)

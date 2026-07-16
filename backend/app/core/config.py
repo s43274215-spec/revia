@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     ocr_worker_max_rss_mb: int = 300
     ocr_worker_threads: int = 1
     ocr_worker_timeout_seconds: int = 180
+    document_memory_diagnostics_enabled: bool = False
     max_upload_mb: int = 150
     max_pdf_pages: int = 600
     workspace_max_active_documents: int = 1
