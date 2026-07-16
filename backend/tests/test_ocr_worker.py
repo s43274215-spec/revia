@@ -138,6 +138,111 @@ class OCRWorkerIsolationTests(unittest.TestCase):
         self.assertNotIn("onnxruntime", sys.modules)
         self.assertFalse(client.initialized)
 
+    def test_worker_failure_log_contains_only_safe_diagnostics(self) -> None:
+        client = OCRWorkerClient(max_rss_mb=300, threads=1, timeout_seconds=180)
+
+        class ExitedProcess:
+            pid = os.getpid()
+            exitcode = -9
+
+            @staticmethod
+            def is_alive() -> bool:
+                return False
+
+            @staticmethod
+            def join(timeout=None) -> None:
+                return None
+
+        class StageThenEOFConnection:
+            def __init__(self) -> None:
+                self.receives = 0
+
+            @staticmethod
+            def send(message) -> None:
+                return None
+
+            @staticmethod
+            def poll(timeout=None) -> bool:
+                return True
+
+            def recv(self):
+                self.receives += 1
+                if self.receives == 1:
+                    return {
+                        "event": "stage",
+                        "stage": "worker_engine_initializing",
+                        "rss_mb": 271.5,
+                    }
+                raise EOFError("private source path must not be logged")
+
+            @staticmethod
+            def close() -> None:
+                return None
+
+        client._process = ExitedProcess()
+        client._connection = StageThenEOFConnection()
+        client._ensure_started = lambda page_number: None
+        with self.assertLogs("revia.ocr.worker", level="ERROR") as captured:
+            with self.assertRaises(OCRWorkerResourceError):
+                client.recognize_page(Path("private-course.pdf"), 1, 144)
+
+        diagnostic = "\n".join(captured.output)
+        self.assertIn("page=1", diagnostic)
+        self.assertIn("exit_code=-9", diagnostic)
+        self.assertIn("timeout=false", diagnostic)
+        self.assertIn("broken_pipe=true", diagnostic)
+        self.assertIn("last_stage=worker_engine_initializing", diagnostic)
+        self.assertIn("peak_rss_mb=271.5", diagnostic)
+        self.assertNotIn("private-course.pdf", diagnostic)
+        self.assertNotIn("private source path", diagnostic)
+
+    def test_worker_timeout_log_is_distinguished_from_broken_pipe(self) -> None:
+        client = OCRWorkerClient(max_rss_mb=300, threads=1, timeout_seconds=0)
+
+        class RunningProcess:
+            pid = os.getpid()
+            exitcode = None
+            alive = True
+
+            def is_alive(self) -> bool:
+                return self.alive
+
+            @staticmethod
+            def join(timeout=None) -> None:
+                return None
+
+            def terminate(self) -> None:
+                self.alive = False
+                self.exitcode = -15
+
+        class SilentConnection:
+            @staticmethod
+            def send(message) -> None:
+                return None
+
+            @staticmethod
+            def poll(timeout=None) -> bool:
+                return False
+
+            @staticmethod
+            def close() -> None:
+                return None
+
+        client._process = RunningProcess()
+        client._connection = SilentConnection()
+        client._ensure_started = lambda page_number: None
+        with self.assertLogs("revia.ocr.worker", level="ERROR") as captured:
+            with self.assertRaises(OCRWorkerResourceError):
+                client.recognize_page(Path("private-course.pdf"), 7, 144)
+
+        diagnostic = "\n".join(captured.output)
+        self.assertIn("page=7", diagnostic)
+        self.assertIn("reason=timeout", diagnostic)
+        self.assertIn("timeout=true", diagnostic)
+        self.assertIn("broken_pipe=false", diagnostic)
+        self.assertIn("last_stage=worker_started", diagnostic)
+        self.assertNotIn("private-course.pdf", diagnostic)
+
 
 class FailingOCRWorker:
     def recognize_page(self, path: Path, page_number: int, dpi: int) -> OCRPageResult:
