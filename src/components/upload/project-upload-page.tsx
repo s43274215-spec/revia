@@ -8,7 +8,9 @@ import {
   DocumentProgress,
   GenerationJob,
   GenerationStatus,
+  activeDocumentDescription,
   getBackendProject,
+  getActiveDocument,
   getDocumentProgress,
   getGenerationJob,
   getLatestDocument,
@@ -208,7 +210,13 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
       await beginJob(Boolean(job?.status === "failed" || submitted));
     } catch (reason) {
       setUploadStage(null);
-      setError(reason instanceof Error ? reason.message : "生成流程启动失败");
+      const message = reason instanceof Error ? reason.message : "生成流程启动失败";
+      if (message.includes("当前已有一份资料正在排队或处理中")) {
+        const activeDocument = await getActiveDocument().catch(() => null);
+        setError(activeDocument ? `当前活动任务：${activeDocumentDescription(activeDocument)}。` : message);
+      } else {
+        setError(message);
+      }
     }
   };
 

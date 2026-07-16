@@ -37,6 +37,30 @@ export type LearningMaterialResponse = { project_id: string; chapters: BackendCh
 
 export type DocumentProcessingStatus = "uploaded" | "queued" | "processing" | "parsing" | "interrupted" | "parsed" | "failed";
 
+export type ActiveDocument = {
+  document_id: string;
+  project_id: string;
+  filename: string;
+  project_name: string;
+  processing_status: DocumentProcessingStatus;
+  processing_phase: string;
+  current_page: number;
+  total_pages: number;
+  processed_pages: number;
+  error_message: string | null;
+};
+
+export function activeDocumentStatusLabel(document: ActiveDocument): string {
+  if (document.processing_phase === "resource_limited") return "等待自动恢复";
+  if (document.processing_status === "queued") return "排队中";
+  if (document.processing_status === "interrupted") return "等待恢复";
+  return "正在处理";
+}
+
+export function activeDocumentDescription(document: ActiveDocument): string {
+  return `${document.project_name} · ${document.filename} · ${activeDocumentStatusLabel(document)} · ${document.processed_pages} / ${document.total_pages || "?"} 页`;
+}
+
 export type DocumentProgress = {
   id: string;
   project_id: string;
@@ -139,6 +163,10 @@ export function getLatestDocument(
   kind: "course_material" | "syllabus",
 ): Promise<DocumentProgress | null> {
   return apiRequest<DocumentProgress | null>(`/projects/${projectId}/documents/latest?kind=${kind}`);
+}
+
+export function getActiveDocument(): Promise<ActiveDocument | null> {
+  return apiRequest<ActiveDocument | null>("/projects/active-document");
 }
 
 export function saveSyllabus(projectId: string, text: string, documentId: string | null): Promise<void> {
