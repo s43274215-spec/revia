@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Icon } from "@/components/learning/icons";
-import { BackendProject, createProject, listProjects } from "@/lib/revia-api";
+import { ActiveDocument, activeDocumentStatusLabel, BackendProject, createProject, getActiveDocument, listProjects } from "@/lib/revia-api";
 import { CreateProjectDialog } from "./create-project-dialog";
 import { SettingsTrigger } from "@/components/settings/settings-trigger";
 
@@ -18,15 +18,17 @@ const statusLabels: Record<BackendProject["status"], string> = {
 export function ProjectDashboard() {
   const router = useRouter();
   const [projects, setProjects] = useState<BackendProject[]>([]);
+  const [activeDocument, setActiveDocument] = useState<ActiveDocument | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
     const refreshProjects = () => {
-      listProjects().then((items) => {
+      Promise.all([listProjects(), getActiveDocument()]).then(([items, currentDocument]) => {
         if (!active) return;
         setProjects(items);
+        setActiveDocument(currentDocument);
         setError(null);
       }).catch((reason: unknown) => {
         if (active) setError(reason instanceof Error ? reason.message : "无法读取项目列表");
@@ -64,6 +66,15 @@ export function ProjectDashboard() {
           <div><span className="entry-eyebrow">我的学习空间</span><h1>复习项目</h1><p>选择一门课程继续阅读，或创建新的复习项目。</p></div>
           <button className="entry-primary new-project-button" onClick={() => setDialogOpen(true)}><b>＋</b>新建项目</button>
         </div>
+        {activeDocument && <div className="project-table active-task-table" aria-label="当前活动任务">
+          <div className="project-table-header"><span>当前活动任务</span><span>处理进度</span><span>当前状态</span><span /></div>
+          <button className="project-row" onClick={() => router.push(`/projects/${activeDocument.project_id}/upload`)}>
+            <span className="project-course"><i>{activeDocument.project_name.slice(0, 1)}</i><span><strong>{activeDocument.project_name}</strong><small>{activeDocument.filename}</small></span></span>
+            <span>{activeDocument.processed_pages} / {activeDocument.total_pages || "?"} 页</span>
+            <span><em className="project-status processing">{activeDocumentStatusLabel(activeDocument)}</em></span>
+            <span className="project-arrow">查看进度&nbsp; →</span>
+          </button>
+        </div>}
         <div className="project-table" aria-label="项目列表">
           <div className="project-table-header"><span>课程名称</span><span>创建时间</span><span>当前状态</span><span /></div>
           {error && <div className="project-row"><span className="project-course"><span><strong>无法连接后端</strong><small>{error}</small></span></span></div>}

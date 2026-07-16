@@ -27,6 +27,19 @@ class ProjectRead(BaseModel):
     updated_at: datetime
 
 
+class ActiveDocumentRead(BaseModel):
+    document_id: uuid.UUID
+    project_id: uuid.UUID
+    filename: str
+    project_name: str
+    processing_status: DocumentProcessingStatus
+    processing_phase: str
+    current_page: int
+    total_pages: int
+    processed_pages: int
+    error_message: str | None
+
+
 class DocumentRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

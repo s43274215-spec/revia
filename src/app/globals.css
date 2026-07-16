@@ -145,6 +145,7 @@ mark { padding:1px 2px; background:#dfe9e3; color:inherit; }
 .new-project-button { display:flex; align-items:center; gap:7px; height:38px; padding:0 15px; font-size:12px; font-weight:600; }
 .new-project-button b { font-size:17px; font-weight:400; }
 .project-table { border-top:1px solid var(--line); }
+.active-task-table { margin-bottom:32px; }
 .project-table-header,.project-row { display:grid; grid-template-columns:minmax(280px,1.7fr) 1fr .7fr 100px; align-items:center; column-gap:24px; width:100%; }
 .project-table-header { height:42px; padding:0 17px; color:var(--faint); font-size:10px; letter-spacing:.08em; }
 .project-row { min-height:86px; padding:0 17px; border:0; border-top:1px solid var(--line); background:transparent; color:var(--muted); text-align:left; font-size:11px; cursor:pointer; transition:background .16s ease; }
@@ -159,6 +160,8 @@ mark { padding:1px 2px; background:#dfe9e3; color:inherit; }
 .project-status::before { content:""; width:6px; height:6px; border-radius:50%; background:#b0ada5; }
 .project-status.completed { color:#557164; }
 .project-status.completed::before { background:#789486; }
+.project-status.processing { color:#78694e; }
+.project-status.processing::before { background:#a88f5d; }
 .project-arrow { color:#90938d; text-align:right; }
 .project-row:hover .project-arrow { color:var(--accent); }
 .entry-dialog-layer { position:fixed; z-index:40; inset:0; display:grid; place-items:center; }

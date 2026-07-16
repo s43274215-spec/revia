@@ -11,6 +11,8 @@ from app.db.base import Base
 from app.db.session import get_db
 from app.core.config import Settings, get_settings
 from app.main import app
+from app.models.enums import DocumentKind, DocumentProcessingStatus
+from app.models.project import Document, Project
 from app.models.workspace import Workspace
 from tests.helpers import authorization_header
 
@@ -80,6 +82,61 @@ class ProjectAPITests(unittest.TestCase):
             headers=authorization_header(other_workspace_id),
         )
         self.assertEqual(response.status_code, 404)
+
+    def test_active_document_is_workspace_scoped_and_returns_progress(self) -> None:
+        other_workspace_id = uuid.uuid4()
+        project_id = uuid.uuid4()
+        other_project_id = uuid.uuid4()
+        with self.Session() as session:
+            session.add(Workspace(id=other_workspace_id))
+            session.add(Project(id=project_id, workspace_id=self.workspace_id, name="人力资源"))
+            session.add(Project(id=other_project_id, workspace_id=other_workspace_id, name="其他工作区"))
+            session.flush()
+            session.add(Document(
+                project_id=project_id,
+                kind=DocumentKind.COURSE_MATERIAL,
+                original_name="1.pdf",
+                mime_type="application/pdf",
+                size_bytes=1024,
+                storage_backend="s3",
+                processing_status=DocumentProcessingStatus.INTERRUPTED,
+                processing_phase="resource_limited",
+                current_page=57,
+                total_pages=100,
+                processed_pages=57,
+                error_message="OCR 处理因服务器资源不足暂停，系统稍后可从当前页继续。",
+            ))
+            session.add(Document(
+                project_id=other_project_id,
+                kind=DocumentKind.COURSE_MATERIAL,
+                original_name="private.pdf",
+                mime_type="application/pdf",
+                size_bytes=1024,
+                storage_backend="s3",
+                processing_status=DocumentProcessingStatus.PROCESSING,
+                processing_phase="extracting",
+            ))
+            session.commit()
+
+        response = self.client.get("/api/v1/projects/active-document")
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["project_id"], str(project_id))
+        self.assertEqual(payload["filename"], "1.pdf")
+        self.assertEqual(payload["project_name"], "人力资源")
+        self.assertEqual(payload["processing_status"], "interrupted")
+        self.assertEqual(payload["processing_phase"], "resource_limited")
+        self.assertEqual(payload["current_page"], 57)
+        self.assertEqual(payload["processed_pages"], 57)
+        self.assertEqual(payload["total_pages"], 100)
+        self.assertIn("资源不足暂停", payload["error_message"])
+
+        isolated = self.client.get(
+            "/api/v1/projects/active-document",
+            headers=authorization_header(other_workspace_id),
+        )
+        self.assertEqual(isolated.status_code, 200, isolated.text)
+        self.assertEqual(isolated.json()["filename"], "private.pdf")
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.auth.dependencies import WorkspaceId
 from app.core.config import Settings, get_settings
-from app.schemas.project import ProjectCreate, ProjectRead, ProjectUpdate
+from app.schemas.project import ActiveDocumentRead, ProjectCreate, ProjectRead, ProjectUpdate
 from app.services.projects import ProjectNotFoundError, ProjectService
 from app.services.storage import build_storage_provider
 
@@ -23,6 +23,26 @@ def list_projects(workspace_id: WorkspaceId, db: DbSession) -> list[ProjectRead]
 @router.post("", response_model=ProjectRead, status_code=status.HTTP_201_CREATED)
 def create_project(payload: ProjectCreate, workspace_id: WorkspaceId, db: DbSession) -> ProjectRead:
     return ProjectRead.model_validate(ProjectService(db).create(workspace_id, payload))
+
+
+@router.get("/active-document", response_model=ActiveDocumentRead | None)
+def get_active_document(workspace_id: WorkspaceId, db: DbSession) -> ActiveDocumentRead | None:
+    active = ProjectService(db).active_document(workspace_id)
+    if active is None:
+        return None
+    document, project_name = active
+    return ActiveDocumentRead(
+        document_id=document.id,
+        project_id=document.project_id,
+        filename=document.original_name,
+        project_name=project_name,
+        processing_status=document.processing_status,
+        processing_phase=document.processing_phase,
+        current_page=document.current_page,
+        total_pages=document.total_pages,
+        processed_pages=document.processed_pages,
+        error_message=document.error_message,
+    )
 
 
 @router.get("/{project_id}", response_model=ProjectRead)

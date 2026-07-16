@@ -4,7 +4,8 @@ from collections.abc import Callable
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.project import Project
+from app.models.enums import DocumentProcessingStatus
+from app.models.project import Document, Project
 from app.schemas.project import ProjectCreate, ProjectUpdate
 
 
@@ -19,6 +20,26 @@ class ProjectService:
     def list(self, workspace_id: uuid.UUID) -> list[Project]:
         statement = select(Project).where(Project.workspace_id == workspace_id).order_by(Project.created_at.desc())
         return list(self._db.scalars(statement).all())
+
+    def active_document(self, workspace_id: uuid.UUID) -> tuple[Document, str] | None:
+        row = self._db.execute(
+            select(Document, Project.name)
+            .join(Project, Document.project_id == Project.id)
+            .where(
+                Project.workspace_id == workspace_id,
+                Document.processing_status.in_([
+                    DocumentProcessingStatus.QUEUED,
+                    DocumentProcessingStatus.PROCESSING,
+                    DocumentProcessingStatus.PARSING,
+                    DocumentProcessingStatus.INTERRUPTED,
+                ]),
+            )
+            .order_by(Document.created_at.asc())
+            .limit(1)
+        ).first()
+        if row is None:
+            return None
+        return row[0], row[1]
 
     def create(self, workspace_id: uuid.UUID, payload: ProjectCreate) -> Project:
         project = Project(workspace_id=workspace_id, name=payload.name.strip(), description=payload.description)
