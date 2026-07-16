@@ -13,6 +13,9 @@ from pathlib import Path
 from app.core.memory import log_ocr_memory, process_rss_mb
 
 
+_WORKER_LOGGER = logging.getLogger("revia.ocr.worker")
+
+
 class OCRUnavailableError(RuntimeError):
     pass
 
@@ -82,6 +85,8 @@ class OCRWorkerClient:
         self._ensure_started(page_number)
         assert self._connection is not None
         assert self._process is not None
+        peak_rss = 0.0
+        last_stage = "worker_started"
         try:
             self._connection.send({
                 "command": "recognize",
@@ -90,11 +95,16 @@ class OCRWorkerClient:
                 "dpi": dpi,
             })
         except (BrokenPipeError, EOFError, OSError) as exc:
-            self.close(force=True)
-            raise OCRWorkerResourceError("OCR 子进程在接收页面前退出") from exc
+            self._raise_resource_failure(
+                page_number,
+                reason="send_failed",
+                peak_rss=peak_rss,
+                last_stage=last_stage,
+                broken_pipe=True,
+                cause=exc,
+            )
 
         deadline = time.monotonic() + self._timeout_seconds
-        peak_rss = 0.0
         threshold_exceeded = False
         recycle_rss_mb = self._max_rss_mb * 0.9
         payload: dict[str, object] | None = None
@@ -104,18 +114,37 @@ class OCRWorkerClient:
             threshold_exceeded = threshold_exceeded or rss >= recycle_rss_mb
             if self._connection.poll(0.1):
                 try:
-                    payload = self._connection.recv()
+                    received = self._connection.recv()
                 except (EOFError, OSError) as exc:
-                    self.close(force=True)
-                    raise OCRWorkerResourceError("OCR 子进程异常退出") from exc
+                    self._raise_resource_failure(
+                        page_number,
+                        reason="receive_failed",
+                        peak_rss=peak_rss,
+                        last_stage=last_stage,
+                        broken_pipe=True,
+                        cause=exc,
+                    )
+                if received.get("event") == "stage":
+                    last_stage = str(received.get("stage") or "unknown")[:64]
+                    peak_rss = max(peak_rss, float(received.get("rss_mb") or 0.0))
+                    continue
+                payload = received
                 break
             if not self._process.is_alive():
-                exit_code = self._process.exitcode
-                self.close(force=True)
-                raise OCRWorkerResourceError(f"OCR 子进程异常退出（code={exit_code}）")
+                self._raise_resource_failure(
+                    page_number,
+                    reason="worker_exited",
+                    peak_rss=peak_rss,
+                    last_stage=last_stage,
+                )
         if payload is None:
-            self.close(force=True)
-            raise OCRWorkerResourceError("OCR 子进程处理页面超时")
+            self._raise_resource_failure(
+                page_number,
+                reason="timeout",
+                peak_rss=peak_rss,
+                last_stage=last_stage,
+                timeout=True,
+            )
 
         log_ocr_memory("worker_peak_observed", page_number, True, rss_mb=peak_rss)
         if not bool(payload.get("ok")):
@@ -138,6 +167,38 @@ class OCRWorkerClient:
         if threshold_exceeded or bool(payload.get("retire_after_page")):
             self.close()
         return result
+
+    def _raise_resource_failure(
+        self,
+        page_number: int,
+        *,
+        reason: str,
+        peak_rss: float,
+        last_stage: str,
+        timeout: bool = False,
+        broken_pipe: bool = False,
+        cause: BaseException | None = None,
+    ) -> None:
+        process = self._process
+        if process is not None and not process.is_alive():
+            process.join(timeout=0.2)
+        exit_code = process.exitcode if process is not None else None
+        _WORKER_LOGGER.error(
+            "ocr_worker_failure page=%d reason=%s exit_code=%s timeout=%s broken_pipe=%s "
+            "last_stage=%s peak_rss_mb=%.1f",
+            page_number,
+            reason,
+            exit_code,
+            str(timeout).lower(),
+            str(broken_pipe).lower(),
+            last_stage,
+            peak_rss,
+        )
+        self.close(force=True)
+        error = OCRWorkerResourceError(f"OCR 子进程资源异常（reason={reason}）")
+        if cause is None:
+            raise error
+        raise error from cause
 
     def close(self, *, force: bool = False) -> None:
         connection, process = self._connection, self._process
@@ -195,14 +256,19 @@ def _rapidocr_worker(connection: Connection, max_rss_mb: int, threads: int) -> N
             path = Path(str(message["path"]))
             dpi = int(message["dpi"])
             try:
-                baseline_rss_mb = log_ocr_memory("worker_received_page", page_number, initialized)
+                baseline_rss_mb = _report_worker_stage(
+                    connection, "worker_received_page", page_number, initialized
+                )
                 if engine is None:
+                    _report_worker_stage(connection, "worker_engine_initializing", page_number, False)
                     from rapidocr import RapidOCR
 
                     engine = RapidOCR(params=_rapidocr_params(threads))
                     initialized = True
                     engine_version = _rapidocr_version()
-                    engine_rss_mb = log_ocr_memory("worker_engine_initialized", page_number, True)
+                    engine_rss_mb = _report_worker_stage(
+                        connection, "worker_engine_initialized", page_number, True
+                    )
                 else:
                     engine_rss_mb = process_rss_mb()
 
@@ -210,8 +276,10 @@ def _rapidocr_worker(connection: Connection, max_rss_mb: int, threads: int) -> N
 
                 lines: list[str] = []
                 render_rss_mb = engine_rss_mb
+                _report_worker_stage(connection, "worker_pdf_opening", page_number, True)
                 document = fitz.open(path)
                 page = document.load_page(page_number - 1)
+                _report_worker_stage(connection, "worker_pdf_opened", page_number, True)
                 try:
                     requested_scale = dpi / 72.0
                     scale = min(requested_scale, 1400 / max(1.0, page.rect.width))
@@ -222,6 +290,7 @@ def _rapidocr_worker(connection: Connection, max_rss_mb: int, threads: int) -> N
                     while top < page.rect.height:
                         bottom = min(page.rect.height, top + band_height_points)
                         clip = fitz.Rect(page.rect.x0, top, page.rect.x1, bottom)
+                        _report_worker_stage(connection, "worker_page_rendering", page_number, True)
                         pixmap = page.get_pixmap(
                             matrix=matrix,
                             clip=clip,
@@ -232,8 +301,11 @@ def _rapidocr_worker(connection: Connection, max_rss_mb: int, threads: int) -> N
                         del pixmap
                         render_rss_mb = max(
                             render_rss_mb,
-                            log_ocr_memory("worker_page_rendered", page_number, True),
+                            _report_worker_stage(
+                                connection, "worker_page_rendered", page_number, True
+                            ),
                         )
+                        _report_worker_stage(connection, "worker_tile_inference", page_number, True)
                         result = engine(tile_bytes)
                         texts = getattr(result, "txts", None) or ()
                         for value in texts:
@@ -244,7 +316,7 @@ def _rapidocr_worker(connection: Connection, max_rss_mb: int, threads: int) -> N
                         del result
                         del tile_bytes
                         gc.collect()
-                        log_ocr_memory("worker_tile_completed", page_number, True)
+                        _report_worker_stage(connection, "worker_tile_completed", page_number, True)
                         if bottom >= page.rect.height:
                             break
                         top = bottom - overlap_points
@@ -255,8 +327,9 @@ def _rapidocr_worker(connection: Connection, max_rss_mb: int, threads: int) -> N
                 text = "\n".join(lines)
                 del lines
                 gc.collect()
-                rss_mb = log_ocr_memory("worker_page_completed", page_number, True)
+                rss_mb = _report_worker_stage(connection, "worker_page_completed", page_number, True)
                 connection.send({
+                    "event": "result",
                     "ok": True,
                     "page_number": page_number,
                     "text": text,
@@ -273,6 +346,7 @@ def _rapidocr_worker(connection: Connection, max_rss_mb: int, threads: int) -> N
                     break
             except Exception as exc:
                 connection.send({
+                    "event": "result",
                     "ok": False,
                     "page_number": page_number,
                     "error": (str(exc).strip() or exc.__class__.__name__)[:300],
@@ -284,6 +358,22 @@ def _rapidocr_worker(connection: Connection, max_rss_mb: int, threads: int) -> N
         engine = None
         gc.collect()
         connection.close()
+
+
+def _report_worker_stage(
+    connection: Connection,
+    stage: str,
+    page_number: int,
+    initialized: bool,
+) -> float:
+    rss_mb = log_ocr_memory(stage, page_number, initialized)
+    connection.send({
+        "event": "stage",
+        "stage": stage,
+        "page_number": page_number,
+        "rss_mb": rss_mb,
+    })
+    return rss_mb
 
 
 def _configure_worker_threads(threads: int) -> None:
