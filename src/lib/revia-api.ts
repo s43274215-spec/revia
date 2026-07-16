@@ -53,6 +53,7 @@ export type DocumentProgress = {
   current_page: number;
   processing_phase: string;
   retry_count: number;
+  retry_not_before: string | null;
   queue_priority: number;
   error_message: string | null;
   created_at: string;

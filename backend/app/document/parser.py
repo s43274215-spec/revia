@@ -4,11 +4,24 @@ from typing import Protocol
 
 import fitz
 
-from app.document.ocr import OCRUnavailableError, RapidOCREngine
+from app.document.ocr import (
+    OCRUnavailableError,
+    OCRWorkerClient,
+    OCRWorkerError,
+    OCRWorkerResourceError,
+)
 from app.models.enums import ExtractionMethod
 
 
 class PDFParsingError(RuntimeError):
+    pass
+
+
+class OCRResourceLimitedError(PDFParsingError):
+    pass
+
+
+class OCRDisabledError(OCRResourceLimitedError):
     pass
 
 
@@ -50,12 +63,21 @@ class PDFParser:
         minimum_text_length: int = 8,
         max_pages: int = 120,
         ocr_engine: "OCREngine | None" = None,
+        ocr_worker: OCRWorkerClient | None = None,
+        ocr_worker_max_rss_mb: int = 300,
+        ocr_worker_threads: int = 1,
+        ocr_worker_timeout_seconds: int = 180,
     ) -> None:
         self._ocr_enabled = ocr_enabled
         self._ocr_dpi = ocr_dpi
         self._minimum_text_length = minimum_text_length
         self._max_pages = max_pages
         self._ocr_engine = ocr_engine
+        self._ocr_worker = ocr_worker
+        self._ocr_worker_max_rss_mb = ocr_worker_max_rss_mb
+        self._ocr_worker_threads = ocr_worker_threads
+        self._ocr_worker_timeout_seconds = ocr_worker_timeout_seconds
+        self._ocr_version: str | None = None
 
     def parse(self, path: Path) -> ParsedPDF:
         try:
@@ -66,7 +88,7 @@ class PDFParser:
                 ocr_failures: list[str] = []
                 for index, page in enumerate(document):
                     try:
-                        extracted_page = self.extract_page(page, index + 1)
+                        extracted_page = self.extract_page(page, index + 1, source_path=path)
                         if extracted_page.extraction_method == ExtractionMethod.OCR:
                             ocr_page_count += 1
                         pages.append(ParsedPageData(page_number=index + 1, text=extracted_page.text))
@@ -79,7 +101,9 @@ class PDFParser:
                 if is_scanned and not any(page.text.strip() for page in pages):
                     detail = "；".join(ocr_failures[:5]) or "OCR 未识别到有效文本"
                     raise PDFParsingError(f"扫描版 PDF OCR 失败：{detail}")
-                engine_version = self._ocr_engine.version if ocr_executed and self._ocr_engine else None
+                engine_version = self._ocr_version or (
+                    self._ocr_engine.version if ocr_executed and self._ocr_engine else None
+                )
                 return ParsedPDF(
                     page_count=document.page_count,
                     pages=pages,
@@ -97,6 +121,8 @@ class PDFParser:
             raise
         except Exception as exc:
             raise PDFParsingError(f"Failed to parse PDF: {path.name}") from exc
+        finally:
+            self.close()
 
     def validate_document(self, document: fitz.Document) -> int:
         if not document.is_pdf:
@@ -114,17 +140,34 @@ class PDFParser:
         except Exception as exc:
             raise PDFParsingError(f"无法打开 PDF：{path.name}") from exc
 
-    def extract_page(self, page: fitz.Page, page_number: int) -> ExtractedPageData:
+    def extract_page(
+        self,
+        page: fitz.Page,
+        page_number: int,
+        *,
+        source_path: Path | None = None,
+        allow_ocr: bool = True,
+    ) -> ExtractedPageData:
         text = self._normalize_text(page.get_text("text", sort=True))
         needs_ocr = len(text) < self._minimum_text_length and bool(page.get_images(full=True))
         if not needs_ocr:
             return ExtractedPageData(page_number, text, ExtractionMethod.TEXT)
         if not self._ocr_enabled:
-            raise PDFParsingError("检测到扫描版 PDF，需要启用 OCR。")
+            raise OCRDisabledError("ocr_disabled")
+        if not allow_ocr:
+            raise OCRResourceLimitedError("OCR 处理因服务器资源不足暂停，系统稍后可从当前页继续。")
         try:
-            return ExtractedPageData(page_number, self._ocr_page(page), ExtractionMethod.OCR)
+            return ExtractedPageData(
+                page_number,
+                self._ocr_page(page, source_path, page_number),
+                ExtractionMethod.OCR,
+            )
         except OCRUnavailableError as exc:
             raise PDFParsingError("检测到扫描版 PDF，需要启用 OCR。") from exc
+        except OCRWorkerResourceError as exc:
+            raise OCRResourceLimitedError("OCR 处理因服务器资源不足暂停，系统稍后可从当前页继续。") from exc
+        except OCRWorkerError as exc:
+            raise PDFParsingError(f"第 {page_number} 页 OCR 失败：{self._safe_error(exc)}") from exc
         except Exception as exc:
             raise PDFParsingError(f"第 {page_number} 页 OCR 失败：{self._safe_error(exc)}") from exc
 
@@ -132,21 +175,35 @@ class PDFParser:
     def _normalize_text(text: str) -> str:
         return text.replace("\r\n", "\n").replace("\r", "\n").strip()
 
-    def _ocr_page(self, page: fitz.Page) -> str:
-        engine = self._get_ocr_engine()
-        pixmap = page.get_pixmap(dpi=self._ocr_dpi, colorspace=fitz.csRGB, alpha=False)
-        image: bytes | None = None
-        try:
-            image = pixmap.tobytes("png")
-            return self._normalize_text(engine.recognize(image))
-        finally:
-            image = None
-            del pixmap
+    def _ocr_page(self, page: fitz.Page, source_path: Path | None, page_number: int) -> str:
+        if self._ocr_engine is not None:
+            pixmap = page.get_pixmap(dpi=self._ocr_dpi, colorspace=fitz.csGRAY, alpha=False)
+            image: bytes | None = None
+            try:
+                image = pixmap.tobytes("png")
+                return self._normalize_text(self._ocr_engine.recognize(image))
+            finally:
+                image = None
+                del pixmap
+        if source_path is None:
+            raise OCRWorkerError("OCR 子进程缺少 PDF 临时路径")
+        result = self._get_ocr_worker().recognize_page(source_path, page_number, self._ocr_dpi)
+        self._ocr_version = result.engine_version
+        return self._normalize_text(result.text)
 
-    def _get_ocr_engine(self) -> "OCREngine":
-        if self._ocr_engine is None:
-            self._ocr_engine = RapidOCREngine()
-        return self._ocr_engine
+    def _get_ocr_worker(self) -> OCRWorkerClient:
+        if self._ocr_worker is None:
+            self._ocr_worker = OCRWorkerClient(
+                max_rss_mb=self._ocr_worker_max_rss_mb,
+                threads=self._ocr_worker_threads,
+                timeout_seconds=self._ocr_worker_timeout_seconds,
+            )
+        return self._ocr_worker
+
+    def close(self) -> None:
+        if self._ocr_worker is not None:
+            self._ocr_worker.close()
+            self._ocr_worker = None
 
     @staticmethod
     def _safe_error(exc: Exception) -> str:

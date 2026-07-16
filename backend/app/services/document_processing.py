@@ -11,7 +11,14 @@ from fastapi import UploadFile
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
-from app.document.parser import PDFParser, PDFParsingError, ParsedPDF, ParsedPageData
+from app.document.parser import (
+    OCRDisabledError,
+    OCRResourceLimitedError,
+    PDFParser,
+    PDFParsingError,
+    ParsedPDF,
+    ParsedPageData,
+)
 from app.document.splitter import StructuredTextSplitter
 from app.document.structure import TextStructurer
 from app.models.document import DocumentPage, ParsedDocument, ParsedPage, TextChunk
@@ -76,6 +83,11 @@ QUEUE_DOCUMENT_STATUSES = (
 # SQLite does not implement SELECT FOR UPDATE. This keeps local/test acceptance
 # deterministic; PostgreSQL uses the QuotaGuard row lock below.
 _quota_lock = RLock()
+_OCR_PAGE_RETRY_LIMIT = 3
+_OCR_RETRY_BASE_SECONDS = 60
+_OCR_RESOURCE_PAUSE_SECONDS = 3600
+_OCR_RESOURCE_MESSAGE = "OCR 处理因服务器资源不足暂停，系统稍后可从当前页继续。"
+_OCR_DISABLED_REASON = "ocr_disabled"
 
 
 class DocumentProcessingService:
@@ -307,6 +319,11 @@ class DocumentProcessingService:
                 raise PDFParsingError("上传的文件不是有效 PDF") from exc
             with pdf_document as pdf:
                 total_pages = self._parser.validate_document(pdf)
+                retry_window_page = (
+                    document.current_page
+                    if document.processing_phase == "resource_limited"
+                    else None
+                )
                 document.total_pages = total_pages
                 document.processing_status = DocumentProcessingStatus.PROCESSING
                 completed_numbers = set(
@@ -324,6 +341,7 @@ class DocumentProcessingService:
                 document.processing_phase = "resuming" if completed_numbers and first_pending <= total_pages else "extracting"
                 document.current_page = min(first_pending, total_pages)
                 document.error_message = None
+                document.retry_not_before = None
                 self._db.commit()
 
                 for page_number in range(1, total_pages + 1):
@@ -338,7 +356,15 @@ class DocumentProcessingService:
                     self._db.commit()
                     page = pdf.load_page(page_number - 1)
                     try:
-                        extracted = self._parser.extract_page(page, page_number)
+                        extracted = self._parser.extract_page(
+                            page,
+                            page_number,
+                            source_path=local_path,
+                            allow_ocr=(
+                                page_record.retry_count < _OCR_PAGE_RETRY_LIMIT
+                                or page_number == retry_window_page
+                            ),
+                        )
                     except Exception as exc:
                         page_record.status = DocumentPageStatus.FAILED
                         page_record.error_message = self._safe_error(exc)
@@ -347,7 +373,7 @@ class DocumentProcessingService:
                         self._db.commit()
                         raise
                     finally:
-                        page = None
+                        del page
 
                     page_record.status = DocumentPageStatus.COMPLETED
                     page_record.extraction_method = extracted.extraction_method
@@ -359,6 +385,7 @@ class DocumentProcessingService:
                     document.failed_pages = self._count_pages(document.id, DocumentPageStatus.FAILED)
                     document.ocr_page_count = self._count_ocr_pages(document.id)
                     self._db.commit()
+                    del extracted
                     if interrupt_after_page == page_number:
                         raise SimulatedInterruption(f"模拟在第 {page_number} 页后中断")
 
@@ -371,6 +398,7 @@ class DocumentProcessingService:
                 raise DocumentProcessingError(str(exc)) from exc
             raise DocumentProcessingError("PDF 逐页解析失败") from exc
         finally:
+            self._parser.close()
             if local_path is not None:
                 self._storage.release_temp(local_path)
 
@@ -402,6 +430,7 @@ class DocumentProcessingService:
                         DocumentProcessingStatus.PARSING,
                         DocumentProcessingStatus.INTERRUPTED,
                     ]),
+                    or_(Document.retry_not_before.is_(None), Document.retry_not_before <= now),
                     or_(Document.lease_owner.is_(None), Document.lease_expires_at < now, Document.lease_owner == owner),
                 )
                 .values(
@@ -436,6 +465,7 @@ class DocumentProcessingService:
                 select(Document)
                 .where(
                     Document.processing_status.in_(QUEUE_DOCUMENT_STATUSES),
+                    or_(Document.retry_not_before.is_(None), Document.retry_not_before <= now),
                     or_(Document.lease_owner.is_(None), Document.lease_expires_at < now),
                 )
                 .order_by(Document.queue_priority.asc(), Document.accepted_at.asc(), Document.created_at.asc())
@@ -635,20 +665,51 @@ class DocumentProcessingService:
         if document is None or document.lease_owner != owner:
             return
         document.retry_count = int(document.retry_count or 0) + 1
+        resource_limited = isinstance(exc, OCRResourceLimitedError)
+        ocr_disabled = isinstance(exc, OCRDisabledError)
         missing_source = isinstance(exc, StorageError) and "不存在" in str(exc)
         invalid_pdf = isinstance(exc, PDFParsingError) and (
             "页数不能超过" in str(exc) or "不是有效 PDF" in str(exc) or "无法打开 PDF" in str(exc)
         )
-        exhausted = document.retry_count >= self._max_document_retries and not isinstance(exc, SimulatedInterruption)
+        exhausted = (
+            document.retry_count >= self._max_document_retries
+            and not isinstance(exc, SimulatedInterruption)
+            and not resource_limited
+        )
         document.processing_status = (
             DocumentProcessingStatus.FAILED
             if missing_source or invalid_pdf or exhausted
             else DocumentProcessingStatus.INTERRUPTED
         )
-        document.processing_phase = "failed" if document.processing_status == DocumentProcessingStatus.FAILED else "interrupted"
+        document.processing_phase = (
+            "failed"
+            if document.processing_status == DocumentProcessingStatus.FAILED
+            else "resource_limited"
+            if resource_limited
+            else "interrupted"
+        )
         if document.processing_status == DocumentProcessingStatus.INTERRUPTED and document.total_pages:
             document.current_page = min(document.total_pages, document.processed_pages + 1)
-        document.error_message = self._safe_error(exc)
+        if resource_limited:
+            page_attempts = int(self._db.scalar(
+                select(DocumentPage.retry_count).where(
+                    DocumentPage.document_id == document.id,
+                    DocumentPage.page_number == document.current_page,
+                )
+            ) or 0)
+            delay_seconds = (
+                _OCR_RESOURCE_PAUSE_SECONDS
+                if page_attempts >= _OCR_PAGE_RETRY_LIMIT - 1
+                else min(
+                    _OCR_RESOURCE_PAUSE_SECONDS,
+                    _OCR_RETRY_BASE_SECONDS * (2 ** max(0, page_attempts)),
+                )
+            )
+            document.retry_not_before = datetime.now(UTC) + timedelta(seconds=delay_seconds)
+            document.error_message = _OCR_DISABLED_REASON if ocr_disabled else _OCR_RESOURCE_MESSAGE
+        else:
+            document.retry_not_before = None
+            document.error_message = self._safe_error(exc)
         document.lease_owner = None
         document.lease_expires_at = None
         if document.processing_status == DocumentProcessingStatus.FAILED:
