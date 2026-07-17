@@ -4,11 +4,11 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Icon } from "@/components/learning/icons";
 import {
+  ActiveDocument,
   BackendProject,
   DocumentProgress,
   GenerationJob,
   GenerationStatus,
-  activeDocumentDescription,
   getBackendProject,
   getActiveDocument,
   getDocumentProgress,
@@ -42,6 +42,17 @@ function conciseSyllabusItem(value: string) {
     .split(/[，,；;。]/, 1)[0]
     .replace(/(?:是)?核心考点|需掌握|重点掌握|无需死记硬背|理解为主/g, "")
     .trim();
+}
+
+function activeDocumentMessage(document: ActiveDocument) {
+  return [
+    "当前活动任务：",
+    `项目名：${document.project_name}`,
+    `文件名：${document.filename}`,
+    `状态：${document.processing_status}`,
+    `阶段：${document.processing_phase}`,
+    `进度：${document.current_page} / ${document.total_pages || "?"} 页`,
+  ].join(" ");
 }
 
 export function ProjectUploadPage({ projectId }: { projectId: string }) {
@@ -188,6 +199,13 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
     setGenerating(true);
     setError(null);
     try {
+      const activeDocument = await getActiveDocument();
+      if (activeDocument) {
+        setUploadStage(null);
+        setError(activeDocumentMessage(activeDocument));
+        return;
+      }
+
       if (!submitted) {
         setUploadStage("uploading");
         if (syllabusText.trim()) await saveSyllabus(project.id, syllabusText, null);
@@ -211,12 +229,8 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
     } catch (reason) {
       setUploadStage(null);
       const message = reason instanceof Error ? reason.message : "生成流程启动失败";
-      if (message.includes("当前已有一份资料正在排队或处理中")) {
-        const activeDocument = await getActiveDocument().catch(() => null);
-        setError(activeDocument ? `当前活动任务：${activeDocumentDescription(activeDocument)}。` : message);
-      } else {
-        setError(message);
-      }
+      const activeDocument = await getActiveDocument().catch(() => null);
+      setError(activeDocument ? activeDocumentMessage(activeDocument) : message);
     }
   };
 
