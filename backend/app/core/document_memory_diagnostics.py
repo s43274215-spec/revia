@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import ctypes
 import gc
 import logging
-import tracemalloc
+import sys
 from collections import Counter
-from pathlib import Path
 
 from sqlalchemy.orm import Session
 
@@ -13,7 +13,6 @@ from app.core.memory import process_rss_mb
 
 _LOGGER = logging.getLogger("revia.documents.memory")
 _CHECKPOINT_INTERVAL = 10
-_TOP_GROWTH_LIMIT = 20
 _IDENTITY_TYPES = (
     "Document",
     "DocumentPage",
@@ -25,21 +24,15 @@ _IDENTITY_TYPES = (
 
 class DocumentMemoryDiagnostics:
     def __init__(self, session: Session, *, enabled: bool = False) -> None:
-        self._session = session
+        self._session: Session | None = session
         self._enabled = enabled
-        self._owns_tracing = False
-        self._previous_snapshot: tracemalloc.Snapshot | None = None
 
     def start(self) -> None:
-        if not self._enabled:
-            return
-        if not tracemalloc.is_tracing():
-            tracemalloc.start(1)
-            self._owns_tracing = True
-        self._previous_snapshot = tracemalloc.take_snapshot()
+        """Keep the hook for callers without starting allocation tracing."""
 
     def page_completed(self, page_number: int, total_pages: int) -> None:
-        if not self._enabled:
+        session = self._session
+        if not self._enabled or session is None:
             return
         _LOGGER.info(
             "document_parent_memory stage=page_completed page=%d total_pages=%d rss_mb=%.1f",
@@ -51,56 +44,43 @@ class DocumentMemoryDiagnostics:
             return
 
         gc_counts = gc.get_count()
-        identity_counts = Counter(type(item).__name__ for item in self._session.identity_map.values())
-        traced_current, traced_peak = tracemalloc.get_traced_memory()
+        identity_counts = Counter(type(item).__name__ for item in session.identity_map.values())
         _LOGGER.info(
             "document_parent_memory stage=checkpoint page=%d total_pages=%d "
             "gc_gen0=%d gc_gen1=%d gc_gen2=%d identity_map=%d "
             "identity_document=%d identity_document_page=%d identity_parsed_document=%d "
-            "identity_parsed_page=%d identity_text_chunk=%d traced_current_kb=%.1f traced_peak_kb=%.1f",
+            "identity_parsed_page=%d identity_text_chunk=%d",
             page_number,
             total_pages,
             gc_counts[0],
             gc_counts[1],
             gc_counts[2],
-            len(self._session.identity_map),
+            len(session.identity_map),
             identity_counts["Document"],
             identity_counts["DocumentPage"],
             identity_counts["ParsedDocument"],
             identity_counts["ParsedPage"],
             identity_counts["TextChunk"],
-            traced_current / 1024,
-            traced_peak / 1024,
         )
-        self._log_tracemalloc_growth(page_number)
 
     def close(self) -> None:
-        self._previous_snapshot = None
-        if self._owns_tracing and tracemalloc.is_tracing():
-            tracemalloc.stop()
-        self._owns_tracing = False
+        self._session = None
+        self._enabled = False
+        release_process_memory()
 
-    def _log_tracemalloc_growth(self, page_number: int) -> None:
-        current_snapshot = tracemalloc.take_snapshot()
-        previous_snapshot = self._previous_snapshot
-        self._previous_snapshot = current_snapshot
-        if previous_snapshot is None:
-            return
-        growth = [
-            statistic
-            for statistic in current_snapshot.compare_to(previous_snapshot, "lineno")
-            if statistic.size_diff > 0
-        ][:_TOP_GROWTH_LIMIT]
-        for rank, statistic in enumerate(growth, start=1):
-            frame = statistic.traceback[0]
-            _LOGGER.info(
-                "document_parent_tracemalloc page=%d rank=%d location=%s:%d "
-                "size_diff_kb=%.1f count_diff=%d",
-                page_number,
-                rank,
-                Path(frame.filename).name,
-                frame.lineno,
-                statistic.size_diff / 1024,
-                statistic.count_diff,
-            )
+
+def release_process_memory() -> None:
+    """Best-effort release of Python and glibc free memory after a document task."""
+    gc.collect()
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        malloc_trim = ctypes.CDLL(None).malloc_trim
+        malloc_trim.argtypes = [ctypes.c_size_t]
+        malloc_trim.restype = ctypes.c_int
+        malloc_trim(0)
+    except Exception:
+        # Non-glibc Linux images may not expose malloc_trim. Cleanup must never
+        # change the durable task result.
+        return
 

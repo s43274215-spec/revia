@@ -3,6 +3,7 @@ import unittest
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select
@@ -27,7 +28,7 @@ from app.models.enums import (
 )
 from app.models.project import Document, Project
 from app.models.workspace import Workspace
-from app.services.document_processing import DocumentProcessingService
+from app.services.document_processing import DocumentProcessingService, LeaseUnavailableError
 from app.services.storage import LocalStorageProvider, build_object_key
 from tests.helpers import authorization_header
 
@@ -144,7 +145,9 @@ class DocumentCancellationTests(unittest.TestCase):
 
     def test_cancel_interrupted_document_is_idempotent_and_releases_active_slot(self) -> None:
         endpoint = f"/api/v1/projects/{self.project_id}/documents/{self.document_id}/cancel"
-        first = self.client.post(endpoint)
+        with patch("app.services.document_processing.release_process_memory") as release_memory:
+            first = self.client.post(endpoint)
+        release_memory.assert_called_once_with()
         self.assertEqual(first.status_code, 200, first.text)
         self.assertEqual(first.json()["processing_status"], "cancelled")
         self.assertEqual(first.json()["processing_phase"], "user_cancelled")
@@ -191,6 +194,73 @@ class DocumentCancellationTests(unittest.TestCase):
             headers=authorization_header(other_workspace_id),
         )
         self.assertEqual(response.status_code, 404, response.text)
+
+    def test_queued_document_can_be_cancelled(self) -> None:
+        with self.Session() as db:
+            document = db.get(Document, self.document_id)
+            assert document is not None
+            document.processing_status = DocumentProcessingStatus.QUEUED
+            document.processing_phase = "queued"
+            document.lease_owner = None
+            document.lease_expires_at = None
+            db.commit()
+
+        response = self.client.post(
+            f"/api/v1/projects/{self.project_id}/documents/{self.document_id}/cancel"
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["processing_status"], "cancelled")
+        self.assertIsNone(self.client.get("/api/v1/projects/active-document").json())
+
+    def test_processing_cancellation_stops_at_next_lease_checkpoint(self) -> None:
+        owner = "active-worker"
+        with self.Session() as db:
+            document = db.get(Document, self.document_id)
+            assert document is not None
+            document.processing_status = DocumentProcessingStatus.PROCESSING
+            document.processing_phase = "extracting"
+            document.lease_owner = owner
+            document.lease_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+            document.retry_not_before = None
+            db.commit()
+
+        response = self.client.post(
+            f"/api/v1/projects/{self.project_id}/documents/{self.document_id}/cancel"
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["processing_status"], "cancelled")
+        self.assertIsNone(self.client.get("/api/v1/projects/active-document").json())
+
+        with self.Session() as db:
+            document = db.get(Document, self.document_id)
+            assert document is not None
+            self.assertEqual(document.lease_owner, owner)
+            service = self._service(db)
+            self.assertIsNone(service.claim_next("second-worker"))
+            with self.assertRaises(LeaseUnavailableError):
+                service._renew_lease(self.document_id, owner)
+            db.refresh(document)
+            self.assertEqual(document.processing_status, DocumentProcessingStatus.CANCELLED)
+            self.assertIsNone(document.lease_owner)
+            self.assertIsNone(document.lease_expires_at)
+
+    def test_non_resource_failure_uses_retry_backoff(self) -> None:
+        owner = "failing-worker"
+        with self.Session() as db:
+            document = db.get(Document, self.document_id)
+            assert document is not None
+            document.processing_status = DocumentProcessingStatus.PROCESSING
+            document.processing_phase = "extracting"
+            document.lease_owner = owner
+            document.lease_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+            document.retry_not_before = None
+            db.commit()
+            self._service(db)._mark_interrupted(self.document_id, owner, RuntimeError("safe parse failure"))
+            db.refresh(document)
+            self.assertEqual(document.processing_status, DocumentProcessingStatus.INTERRUPTED)
+            self.assertEqual(document.processing_phase, "interrupted")
+            self.assertIsNotNone(document.retry_not_before)
+            self.assertEqual(document.error_message, "safe parse failure")
 
     def test_object_delete_failure_does_not_rollback_cancellation(self) -> None:
         with self.Session() as db:

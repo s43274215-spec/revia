@@ -1,3 +1,4 @@
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -11,6 +12,9 @@ from app.document.ocr import (
     OCRWorkerResourceError,
 )
 from app.models.enums import ExtractionMethod
+
+
+_LOGGER = logging.getLogger("revia.documents")
 
 
 class PDFParsingError(RuntimeError):
@@ -167,11 +171,33 @@ class PDFParser:
         page: fitz.Page,
         page_number: int,
     ) -> ExtractedPageData | None:
-        text = self._normalize_text(page.get_text("text", sort=True))
-        needs_ocr = len(text) < self._minimum_text_length and bool(page.get_images(full=True))
+        try:
+            text = self._normalize_text(page.get_text("text", sort=True))
+        except Exception as exc:
+            _LOGGER.warning(
+                "pdf_text_layer_failed page=%d error_type=%s fallback=ocr",
+                page_number,
+                exc.__class__.__name__,
+            )
+            return None
+        has_raster_content = self._has_raster_content(page)
+        minimum_raster_text_length = max(self._minimum_text_length, 32)
+        needs_ocr = has_raster_content and len(text) < minimum_raster_text_length
         if not needs_ocr:
             return ExtractedPageData(page_number, text, ExtractionMethod.TEXT)
         return None
+
+    @staticmethod
+    def _has_raster_content(page: fitz.Page) -> bool:
+        try:
+            if page.get_image_info():
+                return True
+        except (AttributeError, RuntimeError, ValueError):
+            pass
+        try:
+            return bool(page.get_images(full=True))
+        except (AttributeError, RuntimeError, ValueError):
+            return False
 
     def extract_ocr_page(
         self,

@@ -19,7 +19,7 @@ from app.document.parser import (
     ParsedPDF,
     ParsedPageData,
 )
-from app.core.document_memory_diagnostics import DocumentMemoryDiagnostics
+from app.core.document_memory_diagnostics import DocumentMemoryDiagnostics, release_process_memory
 from app.document.splitter import StructuredTextSplitter
 from app.document.structure import TextStructurer
 from app.models.document import DocumentPage, ParsedDocument, ParsedPage, TextChunk
@@ -91,6 +91,7 @@ _quota_lock = RLock()
 _OCR_PAGE_RETRY_LIMIT = 3
 _OCR_RETRY_BASE_SECONDS = 60
 _OCR_RESOURCE_PAUSE_SECONDS = 3600
+_DOCUMENT_RETRY_BASE_SECONDS = 30
 _OCR_RESOURCE_MESSAGE = "OCR 处理因服务器资源不足暂停，系统稍后可从当前页继续。"
 _OCR_DISABLED_REASON = "ocr_disabled"
 
@@ -305,20 +306,35 @@ class DocumentProcessingService:
             raise DocumentNotFoundError("文档不存在")
         if document.processing_status == DocumentProcessingStatus.CANCELLED:
             self._delete_cancelled_object(document, workspace_id)
+            release_process_memory()
             return document
-        if document.processing_status != DocumentProcessingStatus.INTERRUPTED:
-            raise DocumentCancellationError("当前仅支持取消已暂停的文档任务")
+        if document.processing_status not in ACTIVE_DOCUMENT_STATUSES:
+            raise DocumentCancellationError("当前文档任务不可取消")
 
+        lease_expires_at = document.lease_expires_at
+        if lease_expires_at is not None and lease_expires_at.tzinfo is None:
+            lease_expires_at = lease_expires_at.replace(tzinfo=UTC)
+        in_flight = (
+            document.processing_status in {
+                DocumentProcessingStatus.PROCESSING,
+                DocumentProcessingStatus.PARSING,
+            }
+            and document.lease_owner is not None
+            and lease_expires_at is not None
+            and lease_expires_at >= datetime.now(UTC)
+        )
         document.processing_status = DocumentProcessingStatus.CANCELLED
         document.processing_phase = "user_cancelled"
         document.cancelled_at = datetime.now(UTC)
-        document.lease_owner = None
-        document.lease_expires_at = None
+        if not in_flight:
+            document.lease_owner = None
+            document.lease_expires_at = None
         document.retry_not_before = None
         document.error_message = "用户已取消任务"
         self._db.commit()
         self._delete_cancelled_object(document, workspace_id)
         self._db.refresh(document)
+        release_process_memory()
         return document
 
     def latest_document(
@@ -399,8 +415,11 @@ class DocumentProcessingService:
                     self._renew_lease(document.id, lease_owner)
                     document = self._db.get(Document, document.id) or document
                     document.current_page = page_number
-                    if document.processing_phase == "resuming" and page_number > first_pending:
-                        document.processing_phase = "extracting"
+                    document.processing_phase = (
+                        "resuming"
+                        if completed_numbers and page_number == first_pending
+                        else "extracting"
+                    )
                     page_record = self._begin_page(document.id, page_number)
                     self._db.commit()
                     if pdf is None:
@@ -413,6 +432,8 @@ class DocumentProcessingService:
                     try:
                         extracted = self._parser.extract_text_page(page, page_number)
                         if extracted is None and self._parser.requires_page_for_ocr:
+                            document.processing_phase = "ocr"
+                            self._db.commit()
                             extracted = self._parser.extract_ocr_page(
                                 page_number,
                                 source_path=local_path,
@@ -432,6 +453,8 @@ class DocumentProcessingService:
                     if extracted is None:
                         pdf.close()
                         pdf = None
+                        document.processing_phase = "ocr"
+                        self._db.commit()
                         try:
                             extracted = self._parser.extract_ocr_page(
                                 page_number,
@@ -488,6 +511,7 @@ class DocumentProcessingService:
                     Document.processing_status.in_([
                         DocumentProcessingStatus.PROCESSING,
                         DocumentProcessingStatus.PARSING,
+                        DocumentProcessingStatus.CANCELLED,
                     ]),
                     Document.lease_expires_at >= now,
                 )
@@ -529,6 +553,7 @@ class DocumentProcessingService:
                     Document.processing_status.in_([
                         DocumentProcessingStatus.PROCESSING,
                         DocumentProcessingStatus.PARSING,
+                        DocumentProcessingStatus.CANCELLED,
                     ]),
                     Document.lease_expires_at >= now,
                 )
@@ -726,18 +751,42 @@ class DocumentProcessingService:
     def _renew_lease(self, document_id: uuid.UUID, owner: str) -> None:
         result = self._db.execute(
             update(Document)
-            .where(Document.id == document_id, Document.lease_owner == owner)
+            .where(
+                Document.id == document_id,
+                Document.lease_owner == owner,
+                Document.processing_status.in_([
+                    DocumentProcessingStatus.PROCESSING,
+                    DocumentProcessingStatus.PARSING,
+                ]),
+            )
             .values(lease_expires_at=datetime.now(UTC) + timedelta(seconds=self._lease_seconds))
         )
         if not result.rowcount:
             self._db.rollback()
+            document = self._db.get(Document, document_id)
+            if (
+                document is not None
+                and document.processing_status == DocumentProcessingStatus.CANCELLED
+                and document.lease_owner == owner
+            ):
+                document.lease_owner = None
+                document.lease_expires_at = None
+                self._db.commit()
             raise LeaseUnavailableError("文档解析租约已丢失")
         self._db.commit()
 
     def _mark_interrupted(self, document_id: uuid.UUID, owner: str, exc: Exception) -> None:
         self._db.rollback()
         document = self._db.get(Document, document_id)
-        if document is None or document.lease_owner != owner:
+        if document is None:
+            return
+        if document.processing_status == DocumentProcessingStatus.CANCELLED:
+            if document.lease_owner == owner:
+                document.lease_owner = None
+                document.lease_expires_at = None
+                self._db.commit()
+            return
+        if document.lease_owner != owner:
             return
         document.retry_count = int(document.retry_count or 0) + 1
         resource_limited = isinstance(exc, OCRResourceLimitedError)
@@ -783,7 +832,19 @@ class DocumentProcessingService:
             document.retry_not_before = datetime.now(UTC) + timedelta(seconds=delay_seconds)
             document.error_message = _OCR_DISABLED_REASON if ocr_disabled else _OCR_RESOURCE_MESSAGE
         else:
-            document.retry_not_before = None
+            document.retry_not_before = (
+                datetime.now(UTC) + timedelta(
+                    seconds=min(
+                        _OCR_RESOURCE_PAUSE_SECONDS,
+                        _DOCUMENT_RETRY_BASE_SECONDS * (2 ** max(0, document.retry_count - 1)),
+                    )
+                )
+                if (
+                    document.processing_status == DocumentProcessingStatus.INTERRUPTED
+                    and not isinstance(exc, SimulatedInterruption)
+                )
+                else None
+            )
             document.error_message = self._safe_error(exc)
         document.lease_owner = None
         document.lease_expires_at = None
