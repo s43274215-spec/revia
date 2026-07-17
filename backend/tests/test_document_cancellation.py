@@ -3,6 +3,7 @@ import unittest
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select
@@ -144,7 +145,9 @@ class DocumentCancellationTests(unittest.TestCase):
 
     def test_cancel_interrupted_document_is_idempotent_and_releases_active_slot(self) -> None:
         endpoint = f"/api/v1/projects/{self.project_id}/documents/{self.document_id}/cancel"
-        first = self.client.post(endpoint)
+        with patch("app.services.document_processing.release_process_memory") as release_memory:
+            first = self.client.post(endpoint)
+        release_memory.assert_called_once_with()
         self.assertEqual(first.status_code, 200, first.text)
         self.assertEqual(first.json()["processing_status"], "cancelled")
         self.assertEqual(first.json()["processing_phase"], "user_cancelled")

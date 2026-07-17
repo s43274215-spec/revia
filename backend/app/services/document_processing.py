@@ -19,7 +19,7 @@ from app.document.parser import (
     ParsedPDF,
     ParsedPageData,
 )
-from app.core.document_memory_diagnostics import DocumentMemoryDiagnostics
+from app.core.document_memory_diagnostics import DocumentMemoryDiagnostics, release_process_memory
 from app.document.splitter import StructuredTextSplitter
 from app.document.structure import TextStructurer
 from app.models.document import DocumentPage, ParsedDocument, ParsedPage, TextChunk
@@ -306,6 +306,7 @@ class DocumentProcessingService:
             raise DocumentNotFoundError("文档不存在")
         if document.processing_status == DocumentProcessingStatus.CANCELLED:
             self._delete_cancelled_object(document, workspace_id)
+            release_process_memory()
             return document
         if document.processing_status not in ACTIVE_DOCUMENT_STATUSES:
             raise DocumentCancellationError("当前文档任务不可取消")
@@ -333,6 +334,7 @@ class DocumentProcessingService:
         self._db.commit()
         self._delete_cancelled_object(document, workspace_id)
         self._db.refresh(document)
+        release_process_memory()
         return document
 
     def latest_document(
