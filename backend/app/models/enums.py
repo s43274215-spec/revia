@@ -24,6 +24,7 @@ class DocumentProcessingStatus(StrEnum):
     PROCESSING = "processing"
     PARSING = "parsing"
     INTERRUPTED = "interrupted"
+    CANCELLED = "cancelled"
     PARSED = "parsed"
     FAILED = "failed"
 

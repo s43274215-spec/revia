@@ -26,6 +26,7 @@ from app.schemas.document import (
 )
 from app.schemas.project import DocumentRead, SyllabusRead, SyllabusUpsert
 from app.services.document_processing import (
+    DocumentCancellationError,
     DocumentNotFoundError,
     DocumentProcessingError,
     DocumentQuotaError,
@@ -253,6 +254,22 @@ def get_document_progress(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     _schedule_resume(document, runner, background_tasks)
     return _progress(document, service.queue_position(document))
+
+
+@router.post("/{project_id}/documents/{document_id}/cancel", response_model=DocumentProgressRead)
+def cancel_document(
+    project_id: uuid.UUID,
+    document_id: uuid.UUID,
+    workspace_id: WorkspaceId,
+    service: DocumentService,
+) -> DocumentProgressRead:
+    try:
+        document = service.cancel_document(workspace_id, project_id, document_id)
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except DocumentCancellationError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return _progress(document)
 
 
 @router.post("/{project_id}/document-cleanup/expired")
