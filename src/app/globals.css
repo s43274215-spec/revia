@@ -170,6 +170,8 @@ mark { padding:1px 2px; background:#dfe9e3; color:inherit; }
 .active-task-actions button:hover { color:var(--accent); }
 .active-task-actions .active-task-cancel { color:#9b5f55; }
 .active-task-actions button:disabled { opacity:.5; cursor:wait; }
+.active-task-error { overflow:hidden; max-width:420px; color:#9b5f55!important; text-overflow:ellipsis; white-space:nowrap; }
+.active-task-state { display:block; margin-top:5px; color:#92958f; font-size:9px; }
 .entry-dialog-layer { position:fixed; z-index:40; inset:0; display:grid; place-items:center; }
 .entry-dialog-scrim { position:absolute; inset:0; width:100%; border:0; background:rgba(43,46,42,.2); }
 .entry-dialog { position:relative; width:min(460px,calc(100vw - 40px)); padding:32px; border:1px solid var(--line); border-radius:11px; background:var(--paper); box-shadow:0 24px 70px rgba(43,46,42,.16); }

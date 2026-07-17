@@ -72,6 +72,53 @@ class FakeOCREngine:
 
 
 class PDFParserOCRTests(unittest.TestCase):
+    def test_inline_raster_page_with_short_text_is_sent_to_ocr(self) -> None:
+        class InlineRasterPage:
+            def get_text(self, kind: str, *, sort: bool = False):
+                self.kind = kind
+                self.sort = sort
+                return ""
+
+            def get_image_info(self):
+                return [{"bbox": (0, 0, 100, 100)}]
+
+            def get_images(self, *, full: bool = False):
+                return []
+
+        page = InlineRasterPage()
+        extracted = PDFParser(minimum_text_length=8).extract_text_page(page, 1)  # type: ignore[arg-type]
+        self.assertIsNone(extracted)
+        self.assertEqual(page.kind, "text")
+        self.assertTrue(page.sort)
+
+    def test_raster_page_with_sparse_hidden_text_is_sent_to_ocr(self) -> None:
+        class SparseTextRasterPage:
+            def get_text(self, kind: str, *, sort: bool = False):
+                return "扫描页码 001"
+
+            def get_image_info(self):
+                return [{"bbox": (0, 0, 100, 100)}]
+
+            def get_images(self, *, full: bool = False):
+                return []
+
+        extracted = PDFParser(minimum_text_length=8).extract_text_page(  # type: ignore[arg-type]
+            SparseTextRasterPage(),
+            1,
+        )
+        self.assertIsNone(extracted)
+
+    def test_text_layer_exception_falls_back_to_ocr(self) -> None:
+        class BrokenTextLayerPage:
+            def get_text(self, kind: str, *, sort: bool = False):
+                raise RuntimeError("broken text layer")
+
+        with self.assertLogs("revia.documents", level="WARNING") as captured:
+            extracted = PDFParser().extract_text_page(BrokenTextLayerPage(), 1)  # type: ignore[arg-type]
+        self.assertIsNone(extracted)
+        self.assertIn("pdf_text_layer_failed page=1", captured.output[0])
+        self.assertNotIn("broken text layer", captured.output[0])
+
     def test_scanned_page_uses_ocr_and_preserves_existing_parser_output(self) -> None:
         engine = FakeOCREngine()
         with tempfile.TemporaryDirectory() as directory:

@@ -94,17 +94,17 @@ export function ProjectDashboard() {
         {activeDocument && <div className="project-table active-task-table" aria-label="当前活动任务">
           <div className="project-table-header"><span>当前活动任务</span><span>处理进度</span><span>当前状态</span><span /></div>
           <div className="project-row">
-            <span className="project-course"><i>{activeDocument.project_name.slice(0, 1)}</i><span><strong>{activeDocument.project_name}</strong><small>{activeDocument.filename}</small></span></span>
+            <span className="project-course"><i>{activeDocument.project_name.slice(0, 1)}</i><span><strong>{activeDocument.project_name}</strong><small>{activeDocument.filename}</small>{activeDocument.error_message && <small className="active-task-error">{activeDocument.error_message}</small>}</span></span>
             <span>{activeDocument.processed_pages} / {activeDocument.total_pages || "?"} 页</span>
-            <span><em className="project-status processing">{activeDocumentStatusLabel(activeDocument)}</em></span>
+            <span><em className="project-status processing">{activeDocumentStatusLabel(activeDocument)}</em><small className="active-task-state">{activeDocument.processing_status} · {activeDocument.processing_phase}</small></span>
             <span className="active-task-actions">
               <button type="button" onClick={() => router.push(`/projects/${activeDocument.project_id}/upload`)}>查看进度&nbsp; →</button>
-              {activeDocument.processing_status === "interrupted" && <button
+              <button
                 type="button"
                 className="active-task-cancel"
                 disabled={cancellingDocumentId === activeDocument.document_id}
                 onClick={() => cancelActiveDocument(activeDocument)}
-              >{cancellingDocumentId === activeDocument.document_id ? "正在取消…" : "取消任务"}</button>}
+              >{cancellingDocumentId === activeDocument.document_id ? "正在取消…" : "取消任务"}</button>
             </span>
           </div>
         </div>}
