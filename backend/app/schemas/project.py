@@ -59,6 +59,7 @@ class DocumentRead(BaseModel):
     processing_phase: str
     retry_count: int
     retry_not_before: datetime | None
+    cancelled_at: datetime | None
     queue_priority: int
     error_message: str | None
     created_at: datetime

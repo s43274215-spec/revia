@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Icon } from "@/components/learning/icons";
-import { ActiveDocument, activeDocumentStatusLabel, BackendProject, createProject, getActiveDocument, listProjects } from "@/lib/revia-api";
+import { ActiveDocument, activeDocumentStatusLabel, BackendProject, cancelDocument, createProject, getActiveDocument, listProjects } from "@/lib/revia-api";
 import { CreateProjectDialog } from "./create-project-dialog";
 import { SettingsTrigger } from "@/components/settings/settings-trigger";
 
@@ -15,17 +15,22 @@ const statusLabels: Record<BackendProject["status"], string> = {
   failed: "处理失败",
 };
 
+function loadDashboardData(): Promise<[BackendProject[], ActiveDocument | null]> {
+  return Promise.all([listProjects(), getActiveDocument()]);
+}
+
 export function ProjectDashboard() {
   const router = useRouter();
   const [projects, setProjects] = useState<BackendProject[]>([]);
   const [activeDocument, setActiveDocument] = useState<ActiveDocument | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [cancellingDocumentId, setCancellingDocumentId] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
     const refreshProjects = () => {
-      Promise.all([listProjects(), getActiveDocument()]).then(([items, currentDocument]) => {
+      loadDashboardData().then(([items, currentDocument]) => {
         if (!active) return;
         setProjects(items);
         setActiveDocument(currentDocument);
@@ -55,6 +60,26 @@ export function ProjectDashboard() {
     }
   };
 
+  const cancelActiveDocument = async (document: ActiveDocument) => {
+    const confirmed = window.confirm(
+      `确定取消 ${document.filename} 吗？\n\n已完成页面不会删除。\n取消后不会自动继续处理。`,
+    );
+    if (!confirmed) return;
+    setCancellingDocumentId(document.document_id);
+    setError(null);
+    try {
+      await cancelDocument(document.project_id, document.document_id);
+      const [items, currentDocument] = await loadDashboardData();
+      setProjects(items);
+      setActiveDocument(currentDocument);
+      setError(null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "无法取消当前任务");
+    } finally {
+      setCancellingDocumentId(null);
+    }
+  };
+
   return (
     <main className="entry-page">
       <header className="entry-header">
@@ -68,12 +93,20 @@ export function ProjectDashboard() {
         </div>
         {activeDocument && <div className="project-table active-task-table" aria-label="当前活动任务">
           <div className="project-table-header"><span>当前活动任务</span><span>处理进度</span><span>当前状态</span><span /></div>
-          <button className="project-row" onClick={() => router.push(`/projects/${activeDocument.project_id}/upload`)}>
+          <div className="project-row">
             <span className="project-course"><i>{activeDocument.project_name.slice(0, 1)}</i><span><strong>{activeDocument.project_name}</strong><small>{activeDocument.filename}</small></span></span>
             <span>{activeDocument.processed_pages} / {activeDocument.total_pages || "?"} 页</span>
             <span><em className="project-status processing">{activeDocumentStatusLabel(activeDocument)}</em></span>
-            <span className="project-arrow">查看进度&nbsp; →</span>
-          </button>
+            <span className="active-task-actions">
+              <button type="button" onClick={() => router.push(`/projects/${activeDocument.project_id}/upload`)}>查看进度&nbsp; →</button>
+              {activeDocument.processing_status === "interrupted" && <button
+                type="button"
+                className="active-task-cancel"
+                disabled={cancellingDocumentId === activeDocument.document_id}
+                onClick={() => cancelActiveDocument(activeDocument)}
+              >{cancellingDocumentId === activeDocument.document_id ? "正在取消…" : "取消任务"}</button>}
+            </span>
+          </div>
         </div>}
         <div className="project-table" aria-label="项目列表">
           <div className="project-table-header"><span>课程名称</span><span>创建时间</span><span>当前状态</span><span /></div>

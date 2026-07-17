@@ -59,6 +59,10 @@ class DocumentNotFoundError(LookupError):
     pass
 
 
+class DocumentCancellationError(DocumentProcessingError):
+    pass
+
+
 class LeaseUnavailableError(RuntimeError):
     pass
 
@@ -279,6 +283,42 @@ class DocumentProcessingService:
         )
         if document is None:
             raise DocumentNotFoundError("文档不存在")
+        return document
+
+    def cancel_document(
+        self,
+        workspace_id: uuid.UUID,
+        project_id: uuid.UUID,
+        document_id: uuid.UUID,
+    ) -> Document:
+        document = self._db.scalar(
+            select(Document)
+            .join(Project, Document.project_id == Project.id)
+            .where(
+                Document.id == document_id,
+                Document.project_id == project_id,
+                Project.workspace_id == workspace_id,
+            )
+            .with_for_update()
+        )
+        if document is None:
+            raise DocumentNotFoundError("文档不存在")
+        if document.processing_status == DocumentProcessingStatus.CANCELLED:
+            self._delete_cancelled_object(document, workspace_id)
+            return document
+        if document.processing_status != DocumentProcessingStatus.INTERRUPTED:
+            raise DocumentCancellationError("当前仅支持取消已暂停的文档任务")
+
+        document.processing_status = DocumentProcessingStatus.CANCELLED
+        document.processing_phase = "user_cancelled"
+        document.cancelled_at = datetime.now(UTC)
+        document.lease_owner = None
+        document.lease_expires_at = None
+        document.retry_not_before = None
+        document.error_message = "用户已取消任务"
+        self._db.commit()
+        self._delete_cancelled_object(document, workspace_id)
+        self._db.refresh(document)
         return document
 
     def latest_document(
@@ -820,6 +860,19 @@ class DocumentProcessingService:
         if quota:
             raise DocumentQuotaError(message)
         raise DocumentProcessingError(message)
+
+    def _delete_cancelled_object(self, document: Document, workspace_id: uuid.UUID) -> None:
+        if not document.storage_key:
+            return
+        object_key = document.storage_key
+        try:
+            validate_object_scope(object_key, workspace_id, document.id)
+            self._storage.delete_object(object_key)
+        except Exception:
+            # Cancellation is already durable; object cleanup is best-effort.
+            return
+        document.storage_key = None
+        self._db.commit()
 
     @staticmethod
     def _release_quota_once(document: Document) -> bool:

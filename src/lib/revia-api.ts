@@ -35,7 +35,7 @@ export type BackendKnowledgePoint = { id: string; title: string; position: numbe
 export type BackendChapter = { id: string; title: string; position: number; knowledge_points: BackendKnowledgePoint[] };
 export type LearningMaterialResponse = { project_id: string; chapters: BackendChapter[] };
 
-export type DocumentProcessingStatus = "uploaded" | "queued" | "processing" | "parsing" | "interrupted" | "parsed" | "failed";
+export type DocumentProcessingStatus = "uploaded" | "queued" | "processing" | "parsing" | "interrupted" | "cancelled" | "parsed" | "failed";
 
 export type ActiveDocument = {
   document_id: string;
@@ -78,6 +78,7 @@ export type DocumentProgress = {
   processing_phase: string;
   retry_count: number;
   retry_not_before: string | null;
+  cancelled_at: string | null;
   queue_priority: number;
   error_message: string | null;
   created_at: string;
@@ -144,6 +145,9 @@ export async function uploadPDF(
   );
   onProgress?.(progress, "processing");
   while (progress.processing_status !== "parsed") {
+    if (progress.processing_status === "cancelled") {
+      throw new Error("文档处理任务已取消");
+    }
     if (progress.processing_status === "failed") {
       throw new Error(progress.error_message || "PDF 解析失败");
     }
@@ -167,6 +171,12 @@ export function getLatestDocument(
 
 export function getActiveDocument(): Promise<ActiveDocument | null> {
   return apiRequest<ActiveDocument | null>("/projects/active-document");
+}
+
+export function cancelDocument(projectId: string, documentId: string): Promise<DocumentProgress> {
+  return apiRequest<DocumentProgress>(`/projects/${projectId}/documents/${documentId}/cancel`, {
+    method: "POST",
+  });
 }
 
 export function saveSyllabus(projectId: string, text: string, documentId: string | null): Promise<void> {

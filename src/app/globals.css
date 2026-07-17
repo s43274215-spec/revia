@@ -146,6 +146,7 @@ mark { padding:1px 2px; background:#dfe9e3; color:inherit; }
 .new-project-button b { font-size:17px; font-weight:400; }
 .project-table { border-top:1px solid var(--line); }
 .active-task-table { margin-bottom:32px; }
+.active-task-table .project-table-header,.active-task-table .project-row { grid-template-columns:minmax(280px,1.7fr) 1fr .7fr 170px; }
 .project-table-header,.project-row { display:grid; grid-template-columns:minmax(280px,1.7fr) 1fr .7fr 100px; align-items:center; column-gap:24px; width:100%; }
 .project-table-header { height:42px; padding:0 17px; color:var(--faint); font-size:10px; letter-spacing:.08em; }
 .project-row { min-height:86px; padding:0 17px; border:0; border-top:1px solid var(--line); background:transparent; color:var(--muted); text-align:left; font-size:11px; cursor:pointer; transition:background .16s ease; }
@@ -164,6 +165,11 @@ mark { padding:1px 2px; background:#dfe9e3; color:inherit; }
 .project-status.processing::before { background:#a88f5d; }
 .project-arrow { color:#90938d; text-align:right; }
 .project-row:hover .project-arrow { color:var(--accent); }
+.active-task-actions { display:flex; align-items:center; justify-content:flex-end; gap:12px; }
+.active-task-actions button { padding:0; border:0; background:transparent; color:#90938d; font:inherit; cursor:pointer; }
+.active-task-actions button:hover { color:var(--accent); }
+.active-task-actions .active-task-cancel { color:#9b5f55; }
+.active-task-actions button:disabled { opacity:.5; cursor:wait; }
 .entry-dialog-layer { position:fixed; z-index:40; inset:0; display:grid; place-items:center; }
 .entry-dialog-scrim { position:absolute; inset:0; width:100%; border:0; background:rgba(43,46,42,.2); }
 .entry-dialog { position:relative; width:min(460px,calc(100vw - 40px)); padding:32px; border:1px solid var(--line); border-radius:11px; background:var(--paper); box-shadow:0 24px 70px rgba(43,46,42,.16); }
