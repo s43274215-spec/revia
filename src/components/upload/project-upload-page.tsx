@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Icon } from "@/components/learning/icons";
 import {
@@ -70,6 +70,38 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [documentProgress, setDocumentProgress] = useState<DocumentProgress | null>(null);
   const [uploadStage, setUploadStage] = useState<"uploading" | "processing" | null>(null);
+  const generationStartRequestedRef = useRef(false);
+
+  const openLearningMaterial = useCallback(async (finishedJob: GenerationJob) => {
+    if (finishedJob.status !== "completed" && finishedJob.status !== "partial_failed") return;
+    await getLearningMaterial(projectId);
+    router.replace(`/projects/${projectId}/learn`);
+  }, [projectId, router]);
+
+  const beginJob = useCallback(async (regenerate: boolean) => {
+    const createdJob = await startGeneration(projectId, regenerate);
+    setJob(createdJob);
+    setVisibleStatus(createdJob.status);
+    if (createdJob.status === "failed") setError(createdJob.error_message || "生成任务失败");
+    if (createdJob.status === "completed") await openLearningMaterial(createdJob);
+  }, [openLearningMaterial, projectId]);
+
+  const resumeGenerationAfterParsing = useCallback(async () => {
+    if (generationStartRequestedRef.current) return;
+    generationStartRequestedRef.current = true;
+    setGenerating(true);
+    setUploadStage(null);
+    setError(null);
+    try {
+      await beginJob(false);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "生成流程启动失败");
+    }
+  }, [beginJob]);
+
+  useEffect(() => {
+    generationStartRequestedRef.current = false;
+  }, [projectId]);
 
   useEffect(() => {
     let active = true;
@@ -107,6 +139,7 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
   }, [projectId]);
 
   useEffect(() => {
+    if (loadingProject || !project || project.status === "completed") return;
     let active = true;
     getLatestDocument(projectId, "course_material")
       .then((latest) => {
@@ -116,10 +149,13 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
           setGenerating(true);
           setUploadStage("processing");
         }
+        if (latest.processing_status === "parsed") {
+          void resumeGenerationAfterParsing();
+        }
       })
       .catch(() => undefined);
     return () => { active = false; };
-  }, [projectId]);
+  }, [loadingProject, project, projectId, resumeGenerationAfterParsing]);
 
   useEffect(() => {
     if (!documentProgress || !["queued", "processing", "parsing", "interrupted"].includes(documentProgress.processing_status)) return;
@@ -132,20 +168,14 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
         if (current.processing_status === "failed") setError(current.error_message || "PDF 解析失败");
         if (current.processing_status === "parsed") {
           setUploadStage(null);
-          setGenerating(false);
+          void resumeGenerationAfterParsing();
         }
       } catch (reason) {
         if (active) setError(reason instanceof Error ? reason.message : "无法读取解析进度");
       }
     }, 700);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [documentProgress, projectId]);
-
-  const openLearningMaterial = useCallback(async (finishedJob: GenerationJob) => {
-    if (finishedJob.status !== "completed" && finishedJob.status !== "partial_failed") return;
-    await getLearningMaterial(projectId);
-    router.push(`/projects/${projectId}/learn`);
-  }, [projectId, router]);
+  }, [documentProgress, projectId, resumeGenerationAfterParsing]);
 
   useEffect(() => {
     if (!job || terminalStatuses.has(job.status)) return;
@@ -184,16 +214,6 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
   const hasParsedCourse = documentProgress?.kind === "course_material" && documentProgress.processing_status === "parsed";
   const canGenerate = (courseFiles.length > 0 || hasParsedCourse) && (syllabusFiles.length > 0 || syllabusText.trim().length > 0);
 
-  const beginJob = async (regenerate: boolean) => {
-    const createdJob = await startGeneration(projectId, regenerate);
-    setJob(createdJob);
-    setVisibleStatus(createdJob.status);
-    if (createdJob.status === "failed") setError(createdJob.error_message || "生成任务失败");
-    if (createdJob.status === "completed") {
-      await openLearningMaterial(createdJob);
-    }
-  };
-
   const generate = async () => {
     if (!project || (!submitted && !canGenerate)) return;
     setGenerating(true);
@@ -205,6 +225,7 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
         setError(activeDocumentMessage(activeDocument));
         return;
       }
+      generationStartRequestedRef.current = true;
 
       if (!submitted) {
         setUploadStage("uploading");
