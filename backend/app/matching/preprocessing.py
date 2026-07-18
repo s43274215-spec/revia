@@ -1,6 +1,8 @@
 import re
 from dataclasses import dataclass
 
+from app.matching.aliases import normalize_query_key
+
 
 @dataclass(frozen=True)
 class PreparedMatchingQuery:
@@ -79,4 +81,4 @@ class MatchingQueryPreprocessor:
 
     @staticmethod
     def _normalize(value: str) -> str:
-        return re.sub(r"[^\w\u4e00-\u9fff]+", "", value, flags=re.UNICODE).casefold()
+        return normalize_query_key(value)

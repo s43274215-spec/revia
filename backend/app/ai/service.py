@@ -1,4 +1,5 @@
 import uuid
+import json
 import logging
 from dataclasses import dataclass
 from typing import Callable
@@ -6,7 +7,7 @@ from typing import Callable
 from app.ai.clients.base import AIClient
 from app.ai.prompt_builder import PromptBuilder
 from app.ai.prompt_loader import load_prompt, render_prompt
-from app.ai.schemas import GeneratedItemResult, GeneratedProject
+from app.ai.schemas import GeneratedItemResult, GeneratedProject, RetrievalQueryRewrite
 from app.ai.validation import AIOutputValidationError, validate_generated_item, validate_generated_project
 from app.matching.schemas import CandidateChunk
 
@@ -99,6 +100,27 @@ class AIService:
                     + self._safe_validation_reason(second_error)
                 ) from second_error
         return result
+
+    async def rewrite_retrieval_queries(
+        self,
+        *,
+        syllabus_item: str,
+        hierarchy_context: list[str],
+    ) -> list[str]:
+        raw_output = await self._client.generate_completion(
+            system_prompt=load_prompt("query_rewrite_system.txt"),
+            user_prompt=render_prompt(
+                "rewrite_retrieval_query.txt",
+                syllabus_item=syllabus_item,
+                hierarchy_context=json.dumps(hierarchy_context, ensure_ascii=False),
+            ),
+        )
+        try:
+            payload = RetrievalQueryRewrite.model_validate(json.loads(raw_output))
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            logger.warning("AI retrieval query rewrite was ignored because it failed strict validation: %s", exc)
+            return []
+        return payload.queries
 
     @staticmethod
     def _safe_validation_reason(error: AIOutputValidationError) -> str:

@@ -1,9 +1,13 @@
+import json
 import re
 from difflib import SequenceMatcher
 
+from app.matching.aliases import normalize_query_key
 from app.matching.preprocessing import MatchingQueryPreprocessor, PreparedMatchingQuery
+from app.matching.query_planning import QueryPlan, QueryPlanner, SyllabusItemType
 from app.matching.schemas import CandidateChunk, ItemMatch
 from app.models.document import TextChunk
+from app.syllabus.parser import ParsedSyllabusItem
 
 
 class MatchingService:
@@ -17,6 +21,7 @@ class MatchingService:
         max_candidates: int,
         fallback_threshold: float = 0.28,
         preprocessor: MatchingQueryPreprocessor | None = None,
+        query_planner: QueryPlanner | None = None,
     ) -> None:
         if not 0 <= threshold <= 1:
             raise ValueError("Matching threshold must be between 0 and 1")
@@ -28,6 +33,10 @@ class MatchingService:
         self._fallback_threshold = fallback_threshold
         self._max_candidates = max_candidates
         self._preprocessor = preprocessor or MatchingQueryPreprocessor()
+        self._query_planner = query_planner or QueryPlanner(self._preprocessor)
+
+    def plan_items(self, entries: list[ParsedSyllabusItem]) -> list[QueryPlan]:
+        return self._query_planner.plan_items(entries)
 
     def match_item(
         self,
@@ -36,13 +45,116 @@ class MatchingService:
         syllabus_chapter: str | None,
         chunks: list[TextChunk],
     ) -> ItemMatch:
-        prepared = self._preprocessor.prepare(syllabus_item)
+        plan = self._query_planner.plan_item(syllabus_item, chapter=syllabus_chapter)
+        return self.match_plan(plan=plan, chunks=chunks)
+
+    def match_plan(self, *, plan: QueryPlan, chunks: list[TextChunk]) -> ItemMatch:
+        if plan.item_type == SyllabusItemType.TASK and not plan.retrieval_queries:
+            return self._empty_match(plan, {}, "related_theory_pending")
+
+        by_query: dict[str, list[CandidateChunk]] = {}
+        top_scores: dict[str, float] = {}
+        stages: list[str] = []
+        stages_by_query: dict[str, str] = {}
+        for query in plan.retrieval_queries:
+            candidates, top_score, stage = self._retrieve_query(
+                query=query,
+                original_item=plan.original_query,
+                syllabus_chapter=plan.hierarchy_context.chapter,
+                chunks=chunks,
+            )
+            by_query[query] = candidates
+            top_scores[query] = round(top_score, 4)
+            if stage:
+                stages.append(stage)
+                stages_by_query[query] = stage
+
+        limited = self._fuse_query_candidates(plan, by_query)
+        if not limited:
+            maximum = max(top_scores.values(), default=0.0)
+            category = "below_threshold" if maximum < self._fallback_threshold else "insufficient_lexical_evidence"
+            return self._empty_match(plan, top_scores, category)
+        return ItemMatch(
+            syllabus_item=plan.original_query,
+            syllabus_item_original=plan.original_query,
+            matching_query=self._preprocessor.prepare(plan.original_query).matching_query,
+            chapter=plan.hierarchy_context.chapter,
+            matched=True,
+            candidates=limited,
+            query_plan=plan,
+            query_top_scores=top_scores,
+            used_ai_fallback=plan.used_ai_fallback,
+            recall_stage=stages_by_query.get(plan.original_query) or ("primary" if "primary" in stages else "secondary"),
+        )
+
+    def resolve_dependent_matches(self, plans: list[QueryPlan], matches: list[ItemMatch]) -> list[ItemMatch]:
+        resolved = list(matches)
+        indexes_by_title = {normalize_query_key(plan.original_query): index for index, plan in enumerate(plans)}
+        for index, plan in enumerate(plans):
+            if resolved[index].matched and plan.item_type != SyllabusItemType.COLLECTION:
+                continue
+            source_titles: tuple[str, ...] = ()
+            failure_category: str | None = None
+            if plan.item_type == SyllabusItemType.COLLECTION and plan.hierarchy_context.child_titles:
+                source_titles = plan.hierarchy_context.child_titles
+                failure_category = "no_child_evidence"
+            elif plan.item_type == SyllabusItemType.TASK:
+                source_titles = plan.hierarchy_context.related_titles
+                failure_category = "no_related_theory_evidence"
+            else:
+                continue
+
+            source_matches = [
+                resolved[source_index]
+                for title in source_titles
+                if (source_index := indexes_by_title.get(normalize_query_key(title))) is not None
+                and resolved[source_index].matched
+            ]
+            if plan.item_type == SyllabusItemType.COLLECTION and resolved[index].matched:
+                source_matches.insert(0, resolved[index])
+            if not source_matches:
+                resolved[index] = self._empty_match(plan, {}, failure_category or "no_reusable_evidence")
+                continue
+            candidates = self._fuse_reused_candidates(plan, source_matches)
+            top_scores = {
+                query: score
+                for source in source_matches
+                for query, score in source.query_top_scores.items()
+            }
+            resolved[index] = ItemMatch(
+                syllabus_item=plan.original_query,
+                syllabus_item_original=plan.original_query,
+                matching_query="reused_hierarchy_evidence",
+                chapter=plan.hierarchy_context.chapter,
+                matched=bool(candidates),
+                candidates=candidates,
+                query_plan=plan,
+                query_top_scores=top_scores,
+                used_ai_fallback=False,
+                unmatched_reason_category=None if candidates else failure_category,
+                recall_stage="primary" if candidates else None,
+                reason=None if candidates else "unmatched: no reusable hierarchy evidence",
+            )
+        return resolved
+
+    def _retrieve_query(
+        self,
+        *,
+        query: str,
+        original_item: str,
+        syllabus_chapter: str | None,
+        chunks: list[TextChunk],
+    ) -> tuple[list[CandidateChunk], float, str | None]:
+        prepared = self._preprocessor.prepare(query)
         scored: list[tuple[float, TextChunk]] = []
         for chunk in chunks:
             score = self._score(prepared.matching_query, syllabus_chapter, chunk)
-            if self._requires_strict_short_evidence(prepared) and not self._has_recall_evidence(prepared, chunk):
+            if self._requires_strict_short_evidence(prepared) and not self._has_recall_evidence(
+                prepared, chunk, include_chapter=False
+            ):
                 continue
             scored.append((score, chunk))
+        top_score = max((score for score, _ in scored), default=0.0)
 
         primary = self._build_candidates(
             prepared=prepared,
@@ -64,18 +176,91 @@ class MatchingService:
             if not primary and candidates:
                 recall_stage = "secondary"
 
+        candidates = [candidate.model_copy(update={
+            "syllabus_item": original_item,
+            "matched_queries": [query],
+        }) for candidate in candidates]
         candidates.sort(key=lambda candidate: (-candidate.score, candidate.page_start, str(candidate.chunk_id)))
-        limited = candidates[: self._max_candidates]
+        return candidates[: self._max_candidates], top_score, recall_stage
+
+    def _empty_match(self, plan: QueryPlan, top_scores: dict[str, float], category: str) -> ItemMatch:
         return ItemMatch(
-            syllabus_item=prepared.syllabus_item_original,
-            syllabus_item_original=prepared.syllabus_item_original,
-            matching_query=prepared.matching_query,
-            chapter=syllabus_chapter,
-            matched=bool(limited),
-            candidates=limited,
-            recall_stage=recall_stage,
-            reason=None if limited else "unmatched: no TextChunk met the configured relevance threshold",
+            syllabus_item=plan.original_query,
+            syllabus_item_original=plan.original_query,
+            matching_query=plan.original_query,
+            chapter=plan.hierarchy_context.chapter,
+            matched=False,
+            candidates=[],
+            query_plan=plan,
+            query_top_scores=top_scores,
+            used_ai_fallback=plan.used_ai_fallback,
+            unmatched_reason_category=category,
+            reason="unmatched: no TextChunk met the configured relevance threshold",
         )
+
+    def _fuse_query_candidates(
+        self,
+        plan: QueryPlan,
+        by_query: dict[str, list[CandidateChunk]],
+    ) -> list[CandidateChunk]:
+        fused: dict[object, CandidateChunk] = {}
+        for query, candidates in by_query.items():
+            for candidate in candidates:
+                existing = fused.get(candidate.chunk_id)
+                if existing is None:
+                    fused[candidate.chunk_id] = candidate
+                    continue
+                queries = list(dict.fromkeys((*existing.matched_queries, query)))
+                fused[candidate.chunk_id] = existing.model_copy(update={
+                    "score": max(existing.score, candidate.score),
+                    "matched_queries": queries,
+                })
+
+        ranked = sorted(fused.values(), key=lambda candidate: (-candidate.score, candidate.page_start, str(candidate.chunk_id)))
+        selected: list[CandidateChunk] = []
+        if plan.subqueries:
+            uncovered = {normalize_query_key(query) for query in plan.subqueries}
+            while uncovered and len(selected) < self._max_candidates:
+                eligible = [
+                    candidate
+                    for candidate in ranked
+                    if candidate.chunk_id not in {item.chunk_id for item in selected}
+                    and uncovered.intersection(normalize_query_key(query) for query in candidate.matched_queries)
+                ]
+                if not eligible:
+                    break
+                candidate = max(
+                    eligible,
+                    key=lambda item: (
+                        len(uncovered.intersection(normalize_query_key(query) for query in item.matched_queries)),
+                        item.score,
+                        -item.page_start,
+                    ),
+                )
+                selected.append(candidate)
+                uncovered.difference_update(normalize_query_key(query) for query in candidate.matched_queries)
+        selected.extend(candidate for candidate in ranked if candidate.chunk_id not in {item.chunk_id for item in selected})
+        return selected[: self._max_candidates]
+
+    def _fuse_reused_candidates(self, plan: QueryPlan, sources: list[ItemMatch]) -> list[CandidateChunk]:
+        by_query: dict[str, list[CandidateChunk]] = {}
+        for source in sources:
+            by_query[source.syllabus_item_original] = [candidate.model_copy(update={
+                "syllabus_item": plan.original_query,
+                "matched_queries": list(dict.fromkeys((*candidate.matched_queries, source.syllabus_item_original))),
+            }) for candidate in source.candidates]
+        return self._fuse_query_candidates(plan, by_query)
+
+    @staticmethod
+    def failure_diagnostic(match: ItemMatch) -> str:
+        payload = {
+            "item_type": match.query_plan.item_type.value,
+            "queries": [query[:80] for query in match.query_plan.retrieval_queries],
+            "top_scores": {query[:80]: score for query, score in match.query_top_scores.items()},
+            "reason_category": match.unmatched_reason_category or "unmatched",
+            "used_ai_fallback": match.used_ai_fallback,
+        }
+        return "unmatched: " + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
     def select_generation_evidence(
         self,
@@ -87,12 +272,19 @@ class MatchingService:
         if not match.candidates:
             return []
 
-        prepared = self._preprocessor.prepare(match.syllabus_item_original)
         by_position = {(chunk.parsed_document_id, chunk.position): chunk for chunk in chunks}
         pool = list(match.candidates)
+        subquery_keys = {normalize_query_key(query) for query in match.query_plan.subqueries}
+        covered_subquery_candidates = [
+            candidate
+            for candidate in pool
+            if subquery_keys.intersection(normalize_query_key(query) for query in candidate.matched_queries)
+        ]
+        if covered_subquery_candidates:
+            pool = covered_subquery_candidates
         seen_ids = {candidate.chunk_id for candidate in pool}
 
-        for candidate in match.candidates:
+        for candidate in list(pool):
             source = next((chunk for chunk in chunks if chunk.id == candidate.chunk_id), None)
             if source is None:
                 continue
@@ -102,20 +294,29 @@ class MatchingService:
                     continue
                 if not self._same_chapter(source, adjacent):
                     continue
-                adjacent_score = self._score(prepared.matching_query, match.chapter, adjacent)
-                if not self._has_adjacent_evidence(prepared, adjacent):
+                queries = candidate.matched_queries or list(match.query_plan.retrieval_queries)
+                prepared_queries = [self._preprocessor.prepare(query) for query in queries]
+                matching_prepared = [prepared for prepared in prepared_queries if self._has_adjacent_evidence(prepared, adjacent)]
+                if not matching_prepared:
                     continue
-                pool.append(self._candidate(prepared, adjacent_score, adjacent))
+                adjacent_score = max(self._score(prepared.matching_query, match.chapter, adjacent) for prepared in matching_prepared)
+                pool.append(self._candidate(matching_prepared[0], adjacent_score, adjacent).model_copy(update={
+                    "syllabus_item": match.syllabus_item_original,
+                    "matched_queries": [prepared.syllabus_item_original for prepared in matching_prepared],
+                }))
                 seen_ids.add(adjacent.id)
 
         selected: list[CandidateChunk] = []
         remaining = list(pool)
         context_characters = 0
+        uncovered = {normalize_query_key(query) for query in match.query_plan.subqueries}
         while remaining and len(selected) < self._MAX_GENERATION_EVIDENCE:
             ranked = sorted(
                 remaining,
                 key=lambda candidate: (
-                    -self._diversity_score(candidate, selected),
+                    -(self._diversity_score(candidate, selected) + (
+                        0.14 if uncovered.intersection(normalize_query_key(query) for query in candidate.matched_queries) else 0.0
+                    )),
                     candidate.page_start,
                     str(candidate.chunk_id),
                 ),
@@ -128,6 +329,9 @@ class MatchingService:
                 continue
             selected.append(candidate)
             context_characters += len(candidate.text)
+            uncovered.difference_update(normalize_query_key(query) for query in candidate.matched_queries)
+            if match.query_plan.subqueries and not uncovered and len(selected) >= 2:
+                break
         return selected
 
     def _build_candidates(
@@ -144,6 +348,14 @@ class MatchingService:
                 continue
             if require_recall_evidence and not self._has_recall_evidence(prepared, chunk):
                 continue
+            if not require_recall_evidence and score < 0.8:
+                searchable = self._normalize(" ".join(filter(None, (
+                    chunk.chapter_title,
+                    chunk.section_title,
+                    chunk.content,
+                ))))
+                if self._ngram_overlap(self._normalize(prepared.matching_query), searchable) < 0.6:
+                    continue
             candidates.append(self._candidate(prepared, score, chunk))
         return candidates
 
@@ -160,9 +372,15 @@ class MatchingService:
             text=chunk.content,
         )
 
-    def _has_recall_evidence(self, prepared: PreparedMatchingQuery, chunk: TextChunk) -> bool:
+    def _has_recall_evidence(
+        self,
+        prepared: PreparedMatchingQuery,
+        chunk: TextChunk,
+        *,
+        include_chapter: bool = True,
+    ) -> bool:
         searchable = self._normalize(" ".join(filter(None, (
-            chunk.chapter_title,
+            chunk.chapter_title if include_chapter else None,
             chunk.section_title,
             chunk.content,
         ))))
@@ -217,6 +435,8 @@ class MatchingService:
         score = min(base, 1.0)
         if self._is_structural_short_chunk(chunk) and score < 0.9:
             score *= 0.55
+        if score < 0.9 and re.search(r"qkc:/|https?://|复制此链接", chunk.content, flags=re.IGNORECASE):
+            score *= 0.75
         return score
 
     def _is_structural_short_chunk(self, chunk: TextChunk) -> bool:
@@ -253,7 +473,10 @@ class MatchingService:
     @staticmethod
     def _diversity_score(candidate: CandidateChunk, selected: list[CandidateChunk]) -> float:
         if not selected:
-            return candidate.score
+            detail_bonus = 0.05 if len(candidate.text.strip()) >= 50 else -0.08
+            useful_detail = re.search(r"定义|内涵|原理|步骤|流程|因素|例如|例子|案例|计算|公式|方法", candidate.text)
+            utility_bonus = 0.06 if useful_detail else 0.0
+            return candidate.score + detail_bonus + utility_bonus
         overlaps = [
             max(0, min(candidate.page_end, other.page_end) - max(candidate.page_start, other.page_start) + 1)
             for other in selected
@@ -266,7 +489,7 @@ class MatchingService:
 
     @staticmethod
     def _normalize(value: str) -> str:
-        return re.sub(r"[^\w\u4e00-\u9fff]+", "", value, flags=re.UNICODE).casefold()
+        return normalize_query_key(value)
 
     @staticmethod
     def _ngram_overlap(needle: str, haystack: str) -> float:
