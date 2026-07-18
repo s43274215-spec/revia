@@ -1,8 +1,8 @@
 import { Icon } from "./icons";
 
-type ToolbarProps = { query: string; onQueryChange: (value: string) => void; onExport: () => void; onUndo: () => void; onRedo: () => void; canUndo: boolean; canRedo: boolean };
+type ToolbarProps = { query: string; onQueryChange: (value: string) => void; onExport: () => void; onRegenerate: () => void; regenerating: boolean; onUndo: () => void; onRedo: () => void; canUndo: boolean; canRedo: boolean };
 
-export function Toolbar({ query, onQueryChange, onExport, onUndo, onRedo, canUndo, canRedo }: ToolbarProps) {
+export function Toolbar({ query, onQueryChange, onExport, onRegenerate, regenerating, onUndo, onRedo, canUndo, canRedo }: ToolbarProps) {
   return (
     <header className="toolbar">
       <div className="history-actions">
@@ -10,6 +10,7 @@ export function Toolbar({ query, onQueryChange, onExport, onUndo, onRedo, canUnd
         <button aria-label="重做" title="重做" onClick={onRedo} disabled={!canRedo}><Icon name="redo" /></button>
       </div>
       <div className="toolbar-search"><Icon name="search" size={17} /><input value={query} onChange={(e) => onQueryChange(e.target.value)} placeholder="搜索当前项目" aria-label="搜索当前项目" /></div>
+      <button className="regenerate-button" onClick={onRegenerate} disabled={regenerating}>{regenerating ? "正在重新生成" : "重新生成学习材料"}</button>
       <button className="export-button" onClick={onExport}><Icon name="export" size={17} />导出</button>
     </header>
   );

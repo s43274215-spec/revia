@@ -51,7 +51,10 @@ button:focus-visible,input:focus-visible { outline:2px solid color-mix(in srgb,v
 .toolbar-search:focus-within { border-color:#cdd7d1; background:#fff; }
 .toolbar-search input { width:100%; border:0; outline:0; background:transparent; color:var(--ink); font-size:12px; }
 .toolbar-search input::placeholder { color:#a5a6a1; }
-.export-button { display:flex; align-items:center; gap:7px; margin-left:auto; padding:7px 12px; border:1px solid var(--line); border-radius:7px; background:#fff; font-size:11px; cursor:pointer; }
+.regenerate-button { margin-left:auto; padding:7px 12px; border:1px solid var(--line); border-radius:7px; background:transparent; color:#626963; font-size:11px; cursor:pointer; }
+.regenerate-button:hover:not(:disabled) { border-color:#ccd6d0; background:#fff; color:var(--accent); }
+.regenerate-button:disabled { opacity:.55; cursor:wait; }
+.export-button { display:flex; align-items:center; gap:7px; padding:7px 12px; border:1px solid var(--line); border-radius:7px; background:#fff; font-size:11px; cursor:pointer; }
 .export-menu { position:absolute; z-index:7; top:49px; right:27px; width:125px; padding:7px; border:1px solid var(--line); border-radius:8px; background:#fff; box-shadow:0 8px 24px rgba(53,57,52,.1); }
 .export-menu span { display:block; padding:5px 8px; color:var(--faint); font-size:9px; letter-spacing:.1em; }
 .export-menu button { width:100%; padding:7px 8px; border:0; border-radius:5px; background:transparent; text-align:left; font-size:12px; cursor:pointer; }
@@ -227,6 +230,9 @@ mark { padding:1px 2px; background:#dfe9e3; color:inherit; }
 .generation-overlay p { margin:0; color:var(--muted); font-size:11px; }
 .generation-partial { display:grid; justify-items:center; gap:8px; }
 .generation-partial ul { min-width:260px; margin:2px 0 8px; padding:10px 24px; border:1px solid var(--line); border-radius:7px; background:#fff; color:#555b56; text-align:left; font-size:11px; }
+.generation-error-actions { display:flex; justify-content:center; gap:8px; margin-top:18px; }
+.generation-error-actions button { height:35px; padding:0 14px; border:1px solid var(--line); border-radius:7px; background:#fff; font-size:11px; cursor:pointer; }
+.generation-error-actions button.entry-primary { border-color:var(--accent); background:var(--accent); }
 .entry-loading,.missing-project { display:grid; place-items:center; color:var(--muted); font-size:12px; }
 .missing-project { align-content:center; text-align:center; }
 .missing-project h1 { font-family:Georgia,"Songti SC",serif; }
