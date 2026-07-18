@@ -1,5 +1,14 @@
 REVIA_REPAIR_ITEM_JSON_V1
+原始考纲章节：{syllabus_chapter}
+原始考纲名称：{syllabus_item}
 上一次返回未通过结构校验：{validation_error}
+
+必须继续使用与首次生成完全相同的证据，不得重新检索、丢失或替换来源：
+SOURCE_CONTEXT_JSON_START
+{source_context}
+SOURCE_CONTEXT_JSON_END
+
+只返回符合现有 Schema 的单个 JSON 对象，不要返回 Markdown 或解释文字。
 
 只修复 JSON 语法、字段结构和校验指出的格式问题，不得添加、删减或改写原有内容事实。允许缩短重复标题、统一三个版本标题、删除纯 OCR 噪声、调整关键词分隔与数量。不要解释，严格输出修复后的单个 JSON 对象。
 目标结构必须且只能包含：knowledge_point_title；bullet_points 数组；每个要点包含 title、original、recitation、keywords、source_chunk_ids、source_pages；三个版本分别只包含 title 与 content。

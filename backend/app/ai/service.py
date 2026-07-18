@@ -78,6 +78,9 @@ class AIService:
         except AIOutputValidationError as first_error:
             logger.warning("AI item validation failed; starting one repair retry: %s", first_error)
             repair = self._prompt_builder.build_repair(
+                syllabus_chapter=request.syllabus_chapter,
+                syllabus_item=request.syllabus_item,
+                candidates=request.candidates,
                 raw_output=raw_output,
                 validation_error=str(first_error),
             )
@@ -92,9 +95,15 @@ class AIService:
             except AIOutputValidationError as second_error:
                 logger.error("AI item structure repair failed: %s", second_error)
                 raise AIOutputValidationError(
-                    "AI output failed schema validation after one structure-repair retry"
+                    "AI output failed schema validation after one structure-repair retry: "
+                    + self._safe_validation_reason(second_error)
                 ) from second_error
         return result
+
+    @staticmethod
+    def _safe_validation_reason(error: AIOutputValidationError) -> str:
+        reason = " ".join(str(error).split()) or error.__class__.__name__
+        return reason[:300]
 
     @staticmethod
     def _validate_sources(result: GeneratedItemResult, candidates: list[CandidateChunk]) -> None:
