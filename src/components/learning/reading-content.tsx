@@ -1,13 +1,30 @@
-import { MouseEvent } from "react";
-import { KnowledgePoint, Project, Version, versionLabels } from "./data";
+import { Fragment, MouseEvent, ReactNode } from "react";
+import { BulletPoint, Project, Version, versionLabels } from "./data";
+import { classifyContentBlocks } from "./content-format";
 
-type ReadingContentProps = { project: Project; version: Version; query: string; onKeyword: (point: KnowledgePoint) => void; onPointContext: (event: MouseEvent, point: KnowledgePoint) => void };
+type ReadingContentProps = { project: Project; version: Version; query: string; onKeyword: (point: BulletPoint) => void; onPointContext: (event: MouseEvent, point: BulletPoint) => void };
 
 function Highlighted({ text, query }: { text: string; query: string }) {
   if (!query.trim()) return text;
   const index = text.toLowerCase().indexOf(query.toLowerCase());
   if (index < 0) return text;
   return <>{text.slice(0, index)}<mark>{text.slice(index, index + query.length)}</mark>{text.slice(index + query.length)}</>;
+}
+
+function Lines({ lines, query }: { lines: string[]; query: string }) {
+  return <>{lines.map((line, index) => <Fragment key={index}>{index > 0 && <br />}<Highlighted text={line} query={query} /></Fragment>)}</>;
+}
+
+export function renderContentBlocks(content: string[], query: string): ReactNode[] {
+  return classifyContentBlocks(content).map((block, blockIndex) => {
+    if (block.kind === "ordered") {
+      return <ol className="content-list" key={blockIndex}>{block.items.map((item, index) => <li key={index}><Highlighted text={item} query={query} /></li>)}</ol>;
+    }
+    if (block.kind === "unordered") {
+      return <ul className="content-list" key={blockIndex}>{block.items.map((item, index) => <li key={index}><Highlighted text={item} query={query} /></li>)}</ul>;
+    }
+    return <p key={blockIndex}><Lines lines={block.items} query={query} /></p>;
+  });
 }
 
 export function ReadingContent({ project, version, query, onKeyword, onPointContext }: ReadingContentProps) {
@@ -20,18 +37,25 @@ export function ReadingContent({ project, version, query, onKeyword, onPointCont
         <section className="chapter-section" id={chapter.id} key={chapter.id}>
           <div className="chapter-number">第 {chapter.number} 章</div>
           <h2>{chapter.title}</h2>
-          {chapter.points.map((point) => (
-            <section className="knowledge-section" id={point.id} data-point-id={point.id} key={point.id} onContextMenu={(event) => onPointContext(event, point)}>
-              <h3>{point.versions[version].title}</h3>
-              {version === "keywords" ? (
-                <div className="keyword-lines">
-                  {point.versions.keywords.content.map((keyword, index) => (
-                    <button key={`${point.id}-${index}`} onClick={() => onKeyword(point)}>
-                      <span>{String(index + 1).padStart(2, "0")}</span><strong><Highlighted text={keyword} query={query} /></strong><em>查看背诵内容</em>
-                    </button>
-                  ))}
-                </div>
-              ) : point.versions[version].content.map((paragraph, index) => <p key={`${point.id}-${index}`}><Highlighted text={paragraph} query={query} /></p>)}
+          {chapter.points.map((knowledgePoint) => (
+            <section className="knowledge-section" id={knowledgePoint.id} key={knowledgePoint.id}>
+              <h3>{knowledgePoint.title}</h3>
+              <ol className={`bullet-point-list ${knowledgePoint.bulletPoints.length === 1 ? "is-single" : ""}`}>
+                {knowledgePoint.bulletPoints.map((point) => (
+                  <li className="bullet-point" id={point.id} data-point-id={point.id} key={point.id} onContextMenu={(event) => onPointContext(event, point)}>
+                    <h4>{point.versions[version].title}</h4>
+                    {version === "keywords" ? (
+                      <div className="keyword-lines">
+                        {point.versions.keywords.content.map((keyword, index) => (
+                          <button key={`${point.id}-${index}`} onClick={() => onKeyword(point)}>
+                            <span>{String(index + 1).padStart(2, "0")}</span><strong><Highlighted text={keyword} query={query} /></strong><em>查看背诵内容</em>
+                          </button>
+                        ))}
+                      </div>
+                    ) : <div className="bullet-content">{renderContentBlocks(point.versions[version].content, query)}</div>}
+                  </li>
+                ))}
+              </ol>
             </section>
           ))}
         </section>

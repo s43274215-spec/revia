@@ -1,11 +1,11 @@
 import { useState } from "react";
-import { KnowledgePoint, PointVersions, Version, VersionPoint, versionLabels } from "./data";
+import { BulletPoint, PointVersions, Version, VersionPoint, versionLabels } from "./data";
 import { Icon } from "./icons";
 
 export type DrawerState =
-  | { mode: "keyword"; point: KnowledgePoint }
-  | { mode: "single"; point: KnowledgePoint; version: Version }
-  | { mode: "global"; point: KnowledgePoint; version: Version };
+  | { mode: "keyword"; point: BulletPoint }
+  | { mode: "single"; point: BulletPoint; version: Version }
+  | { mode: "global"; point: BulletPoint; version: Version };
 
 const toText = (items: string[]) => items.join("\n\n");
 const fromText = (value: string) => value.split(/\n\s*\n/).map((item) => item.trim()).filter(Boolean);

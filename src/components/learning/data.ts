@@ -4,9 +4,15 @@ export type VersionPoint = { title: string; content: string[] };
 
 export type PointVersions = Record<Version, VersionPoint>;
 
-export type KnowledgePoint = {
+export type BulletPoint = {
   id: string;
   versions: PointVersions;
+};
+
+export type KnowledgePoint = {
+  id: string;
+  title: string;
+  bulletPoints: BulletPoint[];
 };
 
 export type Chapter = {
@@ -104,12 +110,16 @@ export const initialProjects: Project[] = rawProjects.map((project) => ({
   chapters: project.chapters.map((chapter) => ({
     ...chapter,
     points: chapter.points.map((point) => ({
-      id: point.id,
-      versions: {
-        original: { title: point.title, content: point.versions.original },
-        recitation: { title: point.title, content: point.versions.recitation },
-        keywords: { title: point.title, content: point.versions.keywords },
-      },
+      id: `knowledge-${point.id}`,
+      title: point.title,
+      bulletPoints: [{
+        id: point.id,
+        versions: {
+          original: { title: point.title, content: point.versions.original },
+          recitation: { title: point.title, content: point.versions.recitation },
+          keywords: { title: point.title, content: point.versions.keywords },
+        },
+      }],
     })),
   })),
 }));

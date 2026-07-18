@@ -13,6 +13,7 @@ import app.models  # noqa: F401 - registers every ORM model
 from app.ai.clients.base import AIClient, AIConfigurationError
 from app.ai.clients.factory import build_ai_client
 from app.ai.prompt_builder import PromptBuilder
+from app.ai.schemas import GeneratedItemResult
 from app.ai.service import AIService, ItemGenerationRequest
 from app.ai.validation import AIOutputValidationError, validate_generated_item
 from app.core.config import Settings, get_settings
@@ -21,9 +22,10 @@ from app.db.session import get_db
 from app.main import app
 from app.matching.schemas import CandidateChunk
 from app.matching.service import MatchingService
-from app.models.content import BulletPoint, BulletPointSource, Chapter, ContentVersion
+from app.models.content import BulletPoint, BulletPointSource, Chapter, ContentVersion, KnowledgePoint
 from app.models.document import DocumentPage, ParsedPage, TextChunk
 from app.models.project import GenerationJob, Project
+from app.services.knowledge_hierarchy import GeneratedRecord, organize_generated_records
 from app.models.workspace import Workspace
 from app.syllabus.parser import SyllabusParser
 from tests.helpers import authorization_header
@@ -50,6 +52,15 @@ class SyllabusAndMatchingTests(unittest.TestCase):
         self.assertEqual(parsed[0].items, ["外部性", "公共物品", "信息不对称"])
         unchaptered = SyllabusParser().parse("外部性\n公共物品")
         self.assertIsNone(unchaptered[0].chapter)
+
+    def test_syllabus_parser_preserves_explicit_collection_hierarchy_and_order(self) -> None:
+        parsed = SyllabusParser().flatten_hierarchy(
+            "第一章 人力资源\n人力资源的特征\n  1. 能动性\n  2. 可再生性\n人力资源规划"
+        )
+        self.assertEqual([item.title for item in parsed], ["人力资源的特征", "能动性", "可再生性", "人力资源规划"])
+        self.assertEqual(parsed[1].parent_title, "人力资源的特征")
+        self.assertEqual(parsed[2].parent_title, "人力资源的特征")
+        self.assertIsNone(parsed[3].parent_title)
 
     def test_matching_limits_candidates_and_marks_unmatched(self) -> None:
         chunks = [
@@ -281,6 +292,99 @@ class PromptAndGeneratedItemSchemaTests(unittest.TestCase):
         with self.assertRaisesRegex(AIOutputValidationError, "OCR noise"):
             validate_generated_item(json.dumps(ocr_noise, ensure_ascii=False))
 
+    def test_collection_payload_rejects_numbered_children_inside_one_long_content(self) -> None:
+        payload = self.valid_payload(uuid.uuid4())
+        payload["knowledge_point_title"] = "人力资源的特征"
+        payload["bullet_points"][0]["original"]["content"] = "1. 能动性：能够主动劳动。\n2. 可再生性：能够恢复提升。"
+        with self.assertRaisesRegex(AIOutputValidationError, "separate bullet points"):
+            validate_generated_item(json.dumps(payload, ensure_ascii=False))
+
+
+class KnowledgeHierarchyTests(unittest.TestCase):
+    @staticmethod
+    def _candidate(chunk_id: uuid.UUID, text: str) -> CandidateChunk:
+        return CandidateChunk(
+            syllabus_item=text,
+            chunk_id=chunk_id,
+            score=0.9,
+            chapter="第一章 人力资源",
+            section="人力资源特征",
+            page_start=10,
+            page_end=10,
+            text=text,
+        )
+
+    @staticmethod
+    def _result(title: str, bullets: list[tuple[str, uuid.UUID]]) -> GeneratedItemResult:
+        return validate_generated_item(json.dumps({
+            "knowledge_point_title": title,
+            "bullet_points": [{
+                "title": bullet_title,
+                "original": {"title": bullet_title, "content": f"{bullet_title}的定义与核心说明。"},
+                "recitation": {"title": bullet_title, "content": f"{bullet_title}：核心说明与必要解释。"},
+                "keywords": {"title": bullet_title, "content": f"{bullet_title}、核心定义、重要影响"},
+                "source_chunk_ids": [str(chunk_id)],
+                "source_pages": [10],
+            } for bullet_title, chunk_id in bullets],
+        }, ensure_ascii=False))
+
+    def test_collection_children_fold_into_one_parent_with_sources_and_no_top_level_duplicates(self) -> None:
+        titles = ["能动性", "可再生性", "增值性", "时效性", "社会性"]
+        chunk_ids = {title: uuid.uuid4() for title in titles}
+        parent_chunk = uuid.uuid4()
+        records = [GeneratedRecord(
+            syllabus_chapter="第一章 人力资源",
+            syllabus_item="人力资源的特征",
+            parent_syllabus_item=None,
+            result=self._result("人力资源的特征", [(title, parent_chunk) for title in titles]),
+            candidates=[self._candidate(parent_chunk, "人力资源具有能动性、可再生性、增值性、时效性和社会性。")],
+        )]
+        records.extend(GeneratedRecord(
+            syllabus_chapter="第一章 人力资源",
+            syllabus_item=title,
+            parent_syllabus_item="人力资源的特征",
+            result=self._result(title, [("核心说明", chunk_ids[title])]),
+            candidates=[self._candidate(chunk_ids[title], f"{title}的具体解释。")],
+        ) for title in titles)
+
+        organized = organize_generated_records(records)
+
+        self.assertEqual(len(organized), 1)
+        self.assertEqual(organized[0].result.knowledge_point_title, "人力资源的特征")
+        self.assertEqual([bullet.title for bullet in organized[0].result.bullet_points], titles)
+        for bullet in organized[0].result.bullet_points:
+            self.assertIn(chunk_ids[bullet.title], bullet.source_chunk_ids)
+
+    def test_similar_title_without_hierarchy_or_source_overlap_remains_independent(self) -> None:
+        parent_chunk = uuid.uuid4()
+        child_chunk = uuid.uuid4()
+        records = [
+            GeneratedRecord("第一章", "管理方法", None, self._result("管理方法", [("目标管理", parent_chunk)]), [self._candidate(parent_chunk, "目标管理")]),
+            GeneratedRecord("第一章", "管理方法论", None, self._result("管理方法论", [("理论基础", child_chunk)]), [self._candidate(child_chunk, "方法论")]),
+        ]
+        self.assertEqual(len(organize_generated_records(records)), 2)
+
+    def test_parent_bullet_and_overlapping_source_are_sufficient_without_explicit_indent(self) -> None:
+        shared_chunk = uuid.uuid4()
+        records = [
+            GeneratedRecord("第一章", "人力资源的特征", None, self._result("人力资源的特征", [("能动性", shared_chunk)]), [self._candidate(shared_chunk, "人力资源具有能动性")]),
+            GeneratedRecord("第一章", "能动性", None, self._result("能动性", [("核心说明", shared_chunk)]), [self._candidate(shared_chunk, "能动性的解释")]),
+        ]
+        organized = organize_generated_records(records)
+        self.assertEqual(len(organized), 1)
+        self.assertEqual([bullet.title for bullet in organized[0].result.bullet_points], ["能动性"])
+
+    def test_exact_duplicate_knowledge_point_title_is_deduplicated(self) -> None:
+        first_chunk = uuid.uuid4()
+        second_chunk = uuid.uuid4()
+        records = [
+            GeneratedRecord("第一章", "人力资源规划", None, self._result("人力资源规划", [("定义", first_chunk)]), [self._candidate(first_chunk, "定义")]),
+            GeneratedRecord("第一章", "人力资源规划", None, self._result(" 人力资源规划 ", [("作用", second_chunk)]), [self._candidate(second_chunk, "作用")]),
+        ]
+        organized = organize_generated_records(records)
+        self.assertEqual(len(organized), 1)
+        self.assertEqual([bullet.title for bullet in organized[0].result.bullet_points], ["定义", "作用"])
+
 
 class GenerationPipelineAPITests(unittest.TestCase):
     def setUp(self) -> None:
@@ -412,6 +516,24 @@ class GenerationPipelineAPITests(unittest.TestCase):
             self.assertEqual(session.scalar(select(func.count(DocumentPage.id))), initial_page_count)
             self.assertEqual(session.scalar(select(func.count(ParsedPage.id))), initial_parsed_page_count)
             self.assertEqual(session.scalar(select(func.count(TextChunk.id))), initial_chunk_count)
+
+        with self.Session() as session:
+            material_before_failed_regeneration = set(session.scalars(select(KnowledgePoint.id)).all())
+        with patch("app.ai.service.AIService.generate_item", side_effect=RuntimeError("forced generation failure")):
+            failed_regeneration = self.client.post(
+                f"/api/v1/projects/{self.project_id}/generation-jobs?regenerate=true"
+            )
+        self.assertEqual(failed_regeneration.status_code, 202, failed_regeneration.text)
+        failed_status = self.client.get(
+            f"/api/v1/projects/{self.project_id}/generation-jobs/{failed_regeneration.json()['id']}"
+        )
+        self.assertEqual(failed_status.json()["status"], "failed")
+        with self.Session() as session:
+            self.assertEqual(
+                set(session.scalars(select(KnowledgePoint.id)).all()),
+                material_before_failed_regeneration,
+            )
+            self.assertEqual(session.get(Project, self.project_id).status.value, "completed")
         print("GENERATION_JOB_RESULT=" + json.dumps(payload, ensure_ascii=False))
 
     def test_live_generation_endpoint_rejects_missing_key_without_mock_fallback(self) -> None:

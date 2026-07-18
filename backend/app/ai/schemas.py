@@ -22,6 +22,8 @@ _OCR_NOISE_MARKERS = (
     "http://",
     "https://",
 )
+_COLLECTION_TITLE_PATTERN = re.compile(r"(?:特征|特点|类型|原则|步骤|流程|因素|模块|构成|内容|方法)(?:是|为|包括|包含|如下|[：:]?\s*$)")
+_ORDERED_ITEM_PATTERN = re.compile(r"(?:^|\n)\s*(?:\d+[.、)）]|[（(][一二三四五六七八九十\d]+[）)])\s*")
 
 
 def _normalize_title(value: str) -> str:
@@ -176,4 +178,8 @@ class GeneratedItemResult(BaseModel):
             child_titles.append(child)
         if len(child_titles) != len(set(child_titles)):
             raise ValueError("bullet point titles must be unique within a knowledge point")
+        if _COLLECTION_TITLE_PATTERN.search(self.knowledge_point_title) and len(self.bullet_points) == 1:
+            original = self.bullet_points[0].original.content
+            if len(_ORDERED_ITEM_PATTERN.findall(original)) >= 2:
+                raise ValueError("collection items must be returned as separate bullet points")
         return self

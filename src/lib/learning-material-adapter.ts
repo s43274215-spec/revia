@@ -26,9 +26,14 @@ export function toLearningProject(project: BackendProject, material: LearningMat
       id: chapter.id,
       number: String(chapter.position + 1 || chapterIndex + 1).padStart(2, "0"),
       title: chapter.title,
-      points: chapter.knowledge_points.flatMap((knowledgePoint) =>
-        knowledgePoint.bullet_points.map((bullet) => ({ id: bullet.id, versions: versionMap(bullet.versions) })),
-      ),
+      points: chapter.knowledge_points.map((knowledgePoint) => ({
+        id: knowledgePoint.id,
+        title: knowledgePoint.title,
+        bulletPoints: knowledgePoint.bullet_points.map((bullet) => ({
+          id: bullet.id,
+          versions: versionMap(bullet.versions),
+        })),
+      })),
     })),
   };
 }
