@@ -8,7 +8,8 @@ import { DrawerState, OperationDrawer } from "./keyword-drawer";
 import { ReadingContent } from "./reading-content";
 import { OutlineSidebar, ProjectSidebar } from "./sidebars";
 import { Toolbar } from "./toolbar";
-import { GenerationJob, GenerationStatus, getBackendProject, getGenerationJob, getLearningMaterial, listProjects, startGeneration } from "@/lib/revia-api";
+import { GenerationJob, GenerationStatus, getBackendProject, getGenerationJob, getLatestGenerationJob, getLearningMaterial, listProjects, startGeneration } from "@/lib/revia-api";
+import { isTransientNetworkError, SinglePromiseGate } from "@/lib/generation-reliability";
 import { toLearningProject, toProjectShell } from "@/lib/learning-material-adapter";
 
 const tabs: { id: Version; label: string }[] = [{ id: "original", label: "原文" }, { id: "recitation", label: "背诵版" }, { id: "keywords", label: "关键词" }];
@@ -42,8 +43,12 @@ export function LearningPage({ projectId }: { projectId: string }) {
   const [exportOpen, setExportOpen] = useState(false);
   const [generationJob, setGenerationJob] = useState<GenerationJob | null>(null);
   const [generationError, setGenerationError] = useState<string | null>(null);
+  const [generationStarting, setGenerationStarting] = useState(false);
+  const [generationReconnecting, setGenerationReconnecting] = useState(false);
   const [readingProgress, setReadingProgress] = useState(0);
   const readingRef = useRef<HTMLDivElement>(null);
+  const generationStartGateRef = useRef(new SinglePromiseGate<GenerationJob>());
+  const generationAttemptedAtRef = useRef(0);
   const activeProject = history.present.find((project) => project.id === activeProjectId) ?? null;
 
   const loadProjects = useCallback(async () => {
@@ -73,24 +78,46 @@ export function LearningPage({ projectId }: { projectId: string }) {
   }, [loadProjects]);
 
   useEffect(() => {
-    if (!generationJob || terminalGenerationStatuses.has(generationJob.status)) return;
+    if ((!generationJob && !generationReconnecting) || (generationJob && terminalGenerationStatuses.has(generationJob.status))) return;
     let active = true;
-    const timer = window.setTimeout(async () => {
+    let timer = 0;
+    const poll = async () => {
       try {
-        const current = await getGenerationJob(projectId, generationJob.id);
+        const current = generationJob
+          ? await getGenerationJob(projectId, generationJob.id)
+          : await getLatestGenerationJob(projectId);
         if (!active) return;
-        setGenerationJob(current);
-        if (current.status === "failed") setGenerationError(current.error_message || "重新生成任务失败");
+        if (!current || (!generationJob && Date.parse(current.created_at) < generationAttemptedAtRef.current - 10_000)) {
+          setGenerationReconnecting(true);
+          timer = window.setTimeout(poll, 1000);
+          return;
+        }
+        if (current.status === "failed") {
+          setGenerationJob(current);
+          setGenerationReconnecting(false);
+          setGenerationError(current.error_message || "重新生成任务失败");
+          return;
+        }
         if (current.status === "completed" || current.status === "partial_failed") {
           await loadProjects();
-          if (active) setGenerationJob(null);
+          if (active) {
+            setGenerationJob(null);
+            setGenerationReconnecting(false);
+          }
+          return;
         }
-      } catch (reason) {
-        if (active) setGenerationError(reason instanceof Error ? reason.message : "无法读取生成进度");
+        setGenerationJob(current);
+        setGenerationReconnecting(false);
+        timer = window.setTimeout(poll, 300);
+      } catch {
+        if (!active) return;
+        setGenerationReconnecting(true);
+        timer = window.setTimeout(poll, 1000);
       }
-    }, 300);
+    };
+    timer = window.setTimeout(poll, generationReconnecting ? 1000 : 300);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [generationJob, loadProjects, projectId]);
+  }, [generationJob, generationReconnecting, loadProjects, projectId]);
 
   useEffect(() => {
     const close = (event: KeyboardEvent) => { if (event.key === "Escape") { setDrawer(null); setMenu(null); } };
@@ -138,10 +165,13 @@ export function LearningPage({ projectId }: { projectId: string }) {
   const saveSingle = (pointId: string, editedVersion: Version, value: VersionPoint) => { if (!activeProject) return; commit(updatePoint(history.present, activeProject.id, pointId, (point) => ({ ...point, versions: { ...point.versions, [editedVersion]: value } }))); setDrawer(null); };
   const saveGlobal = (pointId: string, versions: PointVersions) => { if (!activeProject) return; commit(updatePoint(history.present, activeProject.id, pointId, (point) => ({ ...point, versions }))); setDrawer(null); };
   const regenerate = async () => {
-    if (generationJob && !generationError) return;
+    if ((generationJob && generationJob.status !== "failed") || generationReconnecting || generationStartGateRef.current.pending) return;
+    generationAttemptedAtRef.current = Date.now();
+    setGenerationJob(null);
     setGenerationError(null);
+    setGenerationStarting(true);
     try {
-      const job = await startGeneration(projectId, true);
+      const job = await generationStartGateRef.current.run(() => startGeneration(projectId, true));
       setGenerationJob(job);
       if (job.status === "failed") setGenerationError(job.error_message || "重新生成任务失败");
       if (job.status === "completed" || job.status === "partial_failed") {
@@ -149,7 +179,10 @@ export function LearningPage({ projectId }: { projectId: string }) {
         setGenerationJob(null);
       }
     } catch (reason) {
-      setGenerationError(reason instanceof Error ? reason.message : "无法启动重新生成");
+      if (isTransientNetworkError(reason)) setGenerationReconnecting(true);
+      else setGenerationError(reason instanceof Error ? reason.message : "无法启动重新生成");
+    } finally {
+      setGenerationStarting(false);
     }
   };
 
@@ -159,7 +192,7 @@ export function LearningPage({ projectId }: { projectId: string }) {
       {loading ? <section className="project-empty"><div><span>复习项目</span><h1>正在读取学习材料</h1><p>正在从 Revia 后端加载当前项目。</p></div></section> : loadError ? <section className="project-empty"><div><span>复习项目</span><h1>无法读取学习材料</h1><p>{loadError}</p></div></section> : !activeProject ? <section className="project-empty"><div><span>复习项目</span><h1>选择一个项目继续阅读</h1><p>从左侧项目列表进入对应的课程复习材料。</p></div></section> : activeProject.chapters.length === 0 ? <section className="project-empty"><div><span>复习项目</span><h1>暂无生成内容</h1><p>当前项目还没有可供阅读的学习材料。</p></div></section> : <>
         <OutlineSidebar project={activeProject} progress={readingProgress} onNavigate={navigate} />
         <section className="workspace">
-          <Toolbar query={query} onQueryChange={setQuery} onExport={() => setExportOpen((value) => !value)} onRegenerate={regenerate} regenerating={Boolean(generationJob)} onUndo={undo} onRedo={redo} canUndo={history.past.length > 0} canRedo={history.future.length > 0} />
+          <Toolbar query={query} onQueryChange={setQuery} onExport={() => setExportOpen((value) => !value)} onRegenerate={regenerate} regenerating={Boolean(generationJob) || generationStarting || generationReconnecting} onUndo={undo} onRedo={redo} canUndo={history.past.length > 0} canRedo={history.future.length > 0} />
           {exportOpen && <div className="export-menu"><span>导出</span><button onClick={() => setExportOpen(false)}>Word</button></div>}
           <div className="version-bar" role="tablist" aria-label="内容版本">
             {tabs.map((tab) => <button role="tab" aria-selected={version === tab.id} className={version === tab.id ? "is-active" : ""} key={tab.id} onClick={() => { setVersion(tab.id); setDrawer(null); }}>{tab.label}</button>)}
@@ -169,7 +202,7 @@ export function LearningPage({ projectId }: { projectId: string }) {
         </section>
       </>}
       {menu && <ContextMenu menu={menu} onSingleEdit={() => edit("single")} onGlobalEdit={() => edit("global")} onDelete={remove} />}
-      {(generationJob || generationError) && <div className="generation-overlay" role="status"><div>{generationJob && !generationError && <i />}<span>{generationError ? "重新生成失败" : generationStatusLabels[generationJob!.status]}</span><h2>{generationError ? "无法重新生成学习材料" : "重新生成学习材料"}</h2><p>{generationError || (generationJob && generationJob.total_items > 0 ? `已处理 ${generationJob.processed_items} / ${generationJob.total_items} 项 · ${generationJob.progress}%` : "正在基于现有资料生成新的学习材料，请稍候。")}</p>{generationError && <div className="generation-error-actions"><button onClick={() => { setGenerationJob(null); setGenerationError(null); }}>取消</button><button className="entry-primary" onClick={() => { setGenerationJob(null); void regenerate(); }}>重试</button></div>}</div></div>}
+      {(generationJob || generationError || generationStarting || generationReconnecting) && <div className="generation-overlay" role="status"><div>{!generationError && <i />}<span>{generationError ? "重新生成失败" : generationReconnecting ? "正在重新连接" : generationStarting ? "正在提交重新生成任务" : generationStatusLabels[generationJob!.status]}</span><h2>{generationError ? "无法重新生成学习材料" : "重新生成学习材料"}</h2><p>{generationError || (generationReconnecting ? "连接暂时中断，正在继续查询已有任务，不会重复创建。" : generationJob && generationJob.total_items > 0 ? `已处理 ${generationJob.processed_items} / ${generationJob.total_items} 项 · ${generationJob.progress}%` : "正在基于现有资料生成新的学习材料，请稍候。")}</p>{generationError && <div className="generation-error-actions"><button onClick={() => { setGenerationJob(null); setGenerationError(null); }}>取消</button><button className="entry-primary" onClick={() => { void regenerate(); }}>重试</button></div>}</div></div>}
     </main>
   );
 }

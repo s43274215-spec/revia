@@ -73,7 +73,7 @@ class AIService:
         if before_validation:
             before_validation()
         try:
-            result = validate_generated_item(raw_output)
+            result = validate_generated_item(raw_output, fallback_title=request.syllabus_item)
             self._validate_sources(result, request.candidates)
         except AIOutputValidationError as first_error:
             logger.warning("AI item validation failed; starting one repair retry: %s", first_error)
@@ -89,7 +89,7 @@ class AIService:
                 user_prompt=repair.user_prompt,
             )
             try:
-                result = validate_generated_item(repaired_output)
+                result = validate_generated_item(repaired_output, fallback_title=request.syllabus_item)
                 self._validate_sources(result, request.candidates)
                 logger.info("AI item structure repair succeeded")
             except AIOutputValidationError as second_error:
@@ -103,7 +103,7 @@ class AIService:
     @staticmethod
     def _safe_validation_reason(error: AIOutputValidationError) -> str:
         reason = " ".join(str(error).split()) or error.__class__.__name__
-        return reason[:300]
+        return reason[:900]
 
     @staticmethod
     def _validate_sources(result: GeneratedItemResult, candidates: list[CandidateChunk]) -> None:

@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 import uuid
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -24,7 +25,9 @@ from app.matching.schemas import CandidateChunk
 from app.matching.service import MatchingService
 from app.models.content import BulletPoint, BulletPointSource, Chapter, ContentVersion, KnowledgePoint
 from app.models.document import DocumentPage, ParsedPage, TextChunk
-from app.models.project import GenerationJob, Project
+from app.models.enums import GenerationItemStatus, GenerationStatus
+from app.models.project import GenerationJob, GenerationJobItem, Project
+from app.services.generation import GenerationWorkflowService
 from app.services.knowledge_hierarchy import GeneratedRecord, organize_generated_records
 from app.models.workspace import Workspace
 from app.syllabus.parser import SyllabusParser
@@ -194,6 +197,38 @@ class AIValidationRetryTests(unittest.IsolatedAsyncioTestCase):
             ))
         self.assertEqual(len(client.prompts), 2)
 
+    async def test_repair_prompt_contains_specific_schema_path_and_reuses_evidence(self) -> None:
+        chunk_id = uuid.uuid4()
+        invalid = PromptAndGeneratedItemSchemaTests.valid_payload(chunk_id)
+        invalid["bullet_points"][0]["keywords"]["content"] = "人口、人力"
+        valid = PromptAndGeneratedItemSchemaTests.valid_payload(chunk_id)
+        client = SequenceClient([
+            json.dumps(invalid, ensure_ascii=False),
+            json.dumps(valid, ensure_ascii=False),
+        ])
+
+        await AIService(client).generate_item(ItemGenerationRequest(
+            project_id=uuid.uuid4(),
+            project_name="人力资源管理",
+            project_description=None,
+            syllabus_chapter="第一章",
+            syllabus_item="人口、人力、人才的关系",
+            candidates=[CandidateChunk(
+                syllabus_item="人口、人力、人才的关系",
+                chunk_id=chunk_id,
+                score=0.9,
+                chapter="第一章",
+                section="基本概念",
+                page_start=16,
+                page_end=16,
+                text="人口、人力与人才是范围不同的概念。",
+            )],
+        ))
+
+        self.assertIn("bullet_points.0", client.prompts[1])
+        self.assertIn("between 3 and 8", client.prompts[1])
+        self.assertIn(str(chunk_id), client.prompts[1])
+
     def test_live_mode_without_key_is_an_explicit_configuration_error(self) -> None:
         with tempfile.TemporaryDirectory() as storage:
             settings = Settings(
@@ -279,8 +314,8 @@ class PromptAndGeneratedItemSchemaTests(unittest.TestCase):
         repeated_parent["bullet_points"][0]["title"] = repeated_title
         for kind in ("original", "recitation", "keywords"):
             repeated_parent["bullet_points"][0][kind]["title"] = repeated_title
-        with self.assertRaisesRegex(AIOutputValidationError, "complete knowledge point title"):
-            validate_generated_item(json.dumps(repeated_parent, ensure_ascii=False))
+        normalized_parent = validate_generated_item(json.dumps(repeated_parent, ensure_ascii=False))
+        self.assertEqual(normalized_parent.bullet_points[0].title, "数量")
 
         too_few_keywords = json.loads(json.dumps(valid, ensure_ascii=False))
         too_few_keywords["bullet_points"][0]["keywords"]["content"] = "人口、数量"
@@ -291,6 +326,30 @@ class PromptAndGeneratedItemSchemaTests(unittest.TestCase):
         ocr_noise["bullet_points"][0]["original"]["content"] += " 严禁复制"
         with self.assertRaisesRegex(AIOutputValidationError, "OCR noise"):
             validate_generated_item(json.dumps(ocr_noise, ensure_ascii=False))
+
+    def test_deterministic_normalization_repairs_production_shape_drift(self) -> None:
+        chunk_id = uuid.uuid4()
+        payload = self.valid_payload(chunk_id)
+        bullet = payload["bullet_points"][0]
+        payload["knowledge_point_title"] = ""
+        payload["bullet_points"] = bullet
+        bullet.pop("title")
+        bullet["keywords"] = ["人口", "人力", "人才"]
+        bullet["source_chunk_ids"] = [str(chunk_id), str(chunk_id)]
+        bullet["source_pages"] = [16, "16"]
+        for key in ("original", "recitation"):
+            bullet[key].pop("title")
+
+        result = validate_generated_item(
+            "```json\n" + json.dumps(payload, ensure_ascii=False) + "\n```",
+            fallback_title="人口、人力、人才的关系",
+        )
+
+        self.assertEqual(result.knowledge_point_title, "人口、人力、人才的关系")
+        self.assertEqual(len(result.bullet_points), 1)
+        self.assertEqual(result.bullet_points[0].keywords.content, "人口、人力、人才")
+        self.assertEqual(result.bullet_points[0].source_chunk_ids, [chunk_id])
+        self.assertEqual(result.bullet_points[0].source_pages, [16])
 
     def test_collection_payload_rejects_numbered_children_inside_one_long_content(self) -> None:
         payload = self.valid_payload(uuid.uuid4())
@@ -384,6 +443,156 @@ class KnowledgeHierarchyTests(unittest.TestCase):
         organized = organize_generated_records(records)
         self.assertEqual(len(organized), 1)
         self.assertEqual([bullet.title for bullet in organized[0].result.bullet_points], ["定义", "作用"])
+
+
+class GenerationReliabilityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.engine = create_engine(
+            "sqlite+pysqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
+        Base.metadata.create_all(self.engine)
+        self.workspace_id = uuid.uuid4()
+        self.project_id = uuid.uuid4()
+        with self.Session() as session:
+            session.add(Workspace(id=self.workspace_id))
+            project = Project(id=self.project_id, workspace_id=self.workspace_id, name="可靠性测试")
+            project.chapters.append(Chapter(title="旧材料", position=0))
+            session.add(project)
+            session.commit()
+
+    def tearDown(self) -> None:
+        self.engine.dispose()
+
+    def _service(self, session, *, stale_after_seconds: int = 1200) -> GenerationWorkflowService:
+        return GenerationWorkflowService(
+            db=session,
+            workspace_id=self.workspace_id,
+            ai_service=AIService(SequenceClient([])),
+            matching_service=MatchingService(threshold=0.35, max_candidates=2),
+            provider_name="mock",
+            stale_after_seconds=stale_after_seconds,
+        )
+
+    @staticmethod
+    def _checkpoint(job_id: uuid.UUID, position: int = 0) -> GenerationJobItem:
+        chunk_id = uuid.uuid4()
+        candidate = CandidateChunk(
+            syllabus_item="人口、人力、人才的关系",
+            chunk_id=chunk_id,
+            score=0.9,
+            chapter="第一章",
+            section="基本概念",
+            page_start=16,
+            page_end=16,
+            text="人口、人力与人才是范围不同的概念。",
+        )
+        return GenerationJobItem(
+            job_id=job_id,
+            position=position,
+            syllabus_chapter="第一章",
+            syllabus_item="人口、人力、人才的关系",
+            status=GenerationItemStatus.SUCCEEDED.value,
+            result_payload=PromptAndGeneratedItemSchemaTests.valid_payload(chunk_id),
+            candidates_payload=[candidate.model_dump(mode="json")],
+            completed_at=datetime.now(UTC),
+        )
+
+    def _active_job(self, *, total_items: int, processed_items: int) -> GenerationJob:
+        now = datetime.now(UTC)
+        return GenerationJob(
+            id=uuid.uuid4(),
+            project_id=self.project_id,
+            status=GenerationStatus.VALIDATING,
+            provider="mock",
+            progress=95,
+            processed_items=processed_items,
+            total_items=total_items,
+            item_failures=[],
+            status_history=["pending", "validating"],
+            successful_items=processed_items,
+            failed_items=0,
+            started_at=now,
+            last_activity_at=now,
+        )
+
+    def test_two_regenerate_preparations_reuse_one_active_job(self) -> None:
+        active = self._active_job(total_items=48, processed_items=10)
+        with self.Session() as session:
+            session.add(active)
+            session.commit()
+        with self.Session() as first_session:
+            first = self._service(first_session).prepare(self.project_id, regenerate=True)
+        with self.Session() as second_session:
+            second = self._service(second_session).prepare(self.project_id, regenerate=True)
+        self.assertFalse(first.should_process)
+        self.assertFalse(second.should_process)
+        self.assertEqual(first.job.id, active.id)
+        self.assertEqual(second.job.id, active.id)
+        with self.Session() as session:
+            self.assertEqual(session.scalar(select(func.count(GenerationJob.id))), 1)
+
+    def test_terminal_checkpoints_finalize_partial_and_completed_jobs(self) -> None:
+        partial = self._active_job(total_items=2, processed_items=2)
+        success = self._checkpoint(partial.id)
+        failure = GenerationJobItem(
+            job_id=partial.id,
+            position=1,
+            syllabus_item="胜任素质模型",
+            status=GenerationItemStatus.FAILED.value,
+            failure_type="schema_validation",
+            error_message="strict schema validation failed",
+            completed_at=datetime.now(UTC),
+        )
+        with self.Session() as session:
+            session.add_all([partial, success, failure])
+            session.commit()
+            recovered = self._service(session).get_job(self.project_id, partial.id)
+            self.assertEqual(recovered.status, GenerationStatus.PARTIAL_FAILED)
+            self.assertIsNotNone(recovered.completed_at)
+            self.assertEqual(recovered.successful_items, 1)
+            self.assertEqual(recovered.failed_items, 1)
+
+            complete = self._active_job(total_items=1, processed_items=1)
+            session.add_all([complete, self._checkpoint(complete.id)])
+            session.commit()
+            recovered_complete = self._service(session).get_job(self.project_id, complete.id)
+            self.assertEqual(recovered_complete.status, GenerationStatus.COMPLETED)
+            self.assertIsNotNone(recovered_complete.completed_at)
+            self.assertEqual(recovered_complete.successful_items, 1)
+            self.assertEqual(recovered_complete.failed_items, 0)
+
+    def test_finalization_error_fails_job_and_preserves_old_material(self) -> None:
+        job = self._active_job(total_items=1, processed_items=1)
+        with self.Session() as session:
+            session.add_all([job, self._checkpoint(job.id)])
+            session.commit()
+            old_chapters = set(session.scalars(select(Chapter.id)).all())
+            service = self._service(session)
+            with patch.object(service, "_replace_learning_material", side_effect=RuntimeError("forced summary failure")):
+                recovered = service.get_job(self.project_id, job.id)
+            self.assertEqual(recovered.status, GenerationStatus.FAILED)
+            self.assertIn("finalization_failed", recovered.error_message or "")
+            self.assertEqual(set(session.scalars(select(Chapter.id)).all()), old_chapters)
+
+    def test_interrupted_45_of_48_job_becomes_stale_and_allows_retry(self) -> None:
+        job = self._active_job(total_items=48, processed_items=45)
+        job.started_at = datetime.now(UTC) - timedelta(hours=1)
+        job.last_activity_at = datetime.now(UTC) - timedelta(hours=1)
+        with self.Session() as session:
+            session.add(job)
+            session.commit()
+            old_chapters = set(session.scalars(select(Chapter.id)).all())
+            service = self._service(session, stale_after_seconds=1)
+            recovered = service.get_job(self.project_id, job.id)
+            self.assertEqual(recovered.status, GenerationStatus.FAILED)
+            self.assertIn("stale_interrupted_generation", recovered.error_message or "")
+            self.assertEqual(set(session.scalars(select(Chapter.id)).all()), old_chapters)
+            retry = service.prepare(self.project_id, regenerate=True)
+            self.assertTrue(retry.should_process)
+            self.assertNotEqual(retry.job.id, job.id)
 
 
 class GenerationPipelineAPITests(unittest.TestCase):
@@ -535,6 +744,37 @@ class GenerationPipelineAPITests(unittest.TestCase):
             )
             self.assertEqual(session.get(Project, self.project_id).status.value, "completed")
         print("GENERATION_JOB_RESULT=" + json.dumps(payload, ensure_ascii=False))
+
+    def test_second_regenerate_request_returns_the_existing_active_job(self) -> None:
+        now = datetime.now(UTC)
+        active = GenerationJob(
+            id=uuid.uuid4(),
+            project_id=self.project_id,
+            status=GenerationStatus.PENDING,
+            provider="mock",
+            progress=0,
+            processed_items=0,
+            total_items=0,
+            item_failures=[],
+            status_history=["pending"],
+            successful_items=0,
+            failed_items=0,
+            started_at=now,
+            last_activity_at=now,
+        )
+        with self.Session() as session:
+            session.add(active)
+            session.commit()
+
+        first = self.client.post(f"/api/v1/projects/{self.project_id}/generation-jobs?regenerate=true")
+        second = self.client.post(f"/api/v1/projects/{self.project_id}/generation-jobs?regenerate=true")
+
+        self.assertEqual(first.status_code, 202, first.text)
+        self.assertEqual(second.status_code, 202, second.text)
+        self.assertEqual(first.json()["id"], str(active.id))
+        self.assertEqual(second.json()["id"], str(active.id))
+        with self.Session() as session:
+            self.assertEqual(session.scalar(select(func.count(GenerationJob.id))), 1)
 
     def test_live_generation_endpoint_rejects_missing_key_without_mock_fallback(self) -> None:
         app.dependency_overrides[get_settings] = lambda: Settings(

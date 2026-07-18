@@ -52,6 +52,13 @@ class GenerationStatus(StrEnum):
     FAILED = "failed"
 
 
+class GenerationItemStatus(StrEnum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
 class ContentVersionKind(StrEnum):
     ORIGINAL = "original"
     RECITATION = "recitation"

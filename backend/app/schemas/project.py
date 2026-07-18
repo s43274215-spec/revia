@@ -93,6 +93,9 @@ class GenerationJobRead(BaseModel):
     item_failures: list[dict[str, str]]
     status_history: list[str]
     error_message: str | None
+    successful_items: int | None
+    failed_items: int | None
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
+    last_activity_at: datetime | None

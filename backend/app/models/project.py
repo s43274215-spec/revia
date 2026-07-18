@@ -1,12 +1,12 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Index, Integer, JSON, String, Text, func
+from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
-from app.models.enums import DocumentKind, DocumentProcessingStatus, GenerationStatus, ProjectStatus
+from app.models.enums import DocumentKind, DocumentProcessingStatus, GenerationItemStatus, GenerationStatus, ProjectStatus
 
 
 class Project(Base):
@@ -102,8 +102,44 @@ class GenerationJob(Base):
     item_failures: Mapped[list[dict[str, str]]] = mapped_column(JSON, default=list)
     status_history: Mapped[list[str]] = mapped_column(JSON, default=list)
     error_message: Mapped[str | None] = mapped_column(Text)
+    successful_items: Mapped[int | None] = mapped_column(Integer)
+    failed_items: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_activity_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
 
     project: Mapped["Project"] = relationship(back_populates="generation_jobs")
+    items: Mapped[list["GenerationJobItem"]] = relationship(
+        back_populates="job",
+        cascade="all, delete-orphan",
+        order_by="GenerationJobItem.position",
+    )
+
+
+class GenerationJobItem(Base):
+    __tablename__ = "generation_job_items"
+    __table_args__ = (
+        UniqueConstraint("job_id", "position", name="uq_generation_job_item_position"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("generation_jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    syllabus_chapter: Mapped[str | None] = mapped_column(Text)
+    syllabus_item: Mapped[str] = mapped_column(Text, nullable=False)
+    parent_syllabus_item: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default=GenerationItemStatus.PENDING.value, index=True)
+    failure_type: Mapped[str | None] = mapped_column(String(64))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    result_payload: Mapped[dict[str, object] | None] = mapped_column(JSON)
+    candidates_payload: Mapped[list[dict[str, object]] | None] = mapped_column(JSON)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), index=True
+    )
+
+    job: Mapped["GenerationJob"] = relationship(back_populates="items")
