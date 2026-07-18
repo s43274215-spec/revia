@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     ai_max_output_tokens: int = 4096
     ai_temperature: float = 0.1
     matching_threshold: float = 0.35
-    matching_max_candidates: int = 3
+    matching_max_candidates: int = 6
     ocr_enabled: bool = True
     ocr_dpi: int = 144
     ocr_minimum_text_length: int = 8

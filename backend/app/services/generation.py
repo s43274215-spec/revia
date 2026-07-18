@@ -137,6 +137,7 @@ class GenerationWorkflowService:
                     self._record_progress(job, index, failures)
                     continue
                 self._set_status(job, GenerationStatus.GENERATING)
+                evidence = self._matching.select_generation_evidence(match=match, chunks=chunks)
                 try:
                     result = await self._ai_service.generate_item(
                         ItemGenerationRequest(
@@ -145,7 +146,7 @@ class GenerationWorkflowService:
                             project_description=project.description,
                             syllabus_chapter=match.chapter,
                             syllabus_item=match.syllabus_item,
-                            candidates=match.candidates,
+                            candidates=evidence,
                         ),
                         before_validation=lambda: self._set_status(job, GenerationStatus.VALIDATING),
                     )
@@ -153,7 +154,7 @@ class GenerationWorkflowService:
                         syllabus_chapter=match.chapter,
                         syllabus_item=match.syllabus_item,
                         result=result,
-                        candidates=match.candidates,
+                        candidates=evidence,
                     ))
                 except Exception as exc:
                     failures.append({"syllabus_item": match.syllabus_item, "reason": self._safe_error(exc)})

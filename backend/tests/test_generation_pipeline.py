@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 import uuid
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select
@@ -21,7 +22,7 @@ from app.main import app
 from app.matching.schemas import CandidateChunk
 from app.matching.service import MatchingService
 from app.models.content import BulletPoint, BulletPointSource, Chapter, ContentVersion
-from app.models.document import TextChunk
+from app.models.document import DocumentPage, ParsedPage, TextChunk
 from app.models.project import GenerationJob, Project
 from app.models.workspace import Workspace
 from app.syllabus.parser import SyllabusParser
@@ -157,11 +158,17 @@ class AIValidationRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.knowledge_point_title, "外部性")
         self.assertEqual(len(client.prompts), 2)
         self.assertIn("REVIA_REPAIR_ITEM_JSON_V1", client.prompts[1])
+        self.assertIn("原始考纲名称：外部性", client.prompts[1])
+        self.assertIn(str(chunk_id), client.prompts[1])
+        self.assertIn("SOURCE_CONTEXT_JSON_START", client.prompts[1])
 
     async def test_second_invalid_response_fails_without_an_unbounded_retry(self) -> None:
         chunk_id = uuid.uuid4()
         client = SequenceClient(["not-json", "still-not-json"])
-        with self.assertRaisesRegex(AIOutputValidationError, "after one structure-repair retry"):
+        with self.assertRaisesRegex(
+            AIOutputValidationError,
+            "after one structure-repair retry: AI output did not contain a JSON object",
+        ):
             await AIService(client).generate_item(ItemGenerationRequest(
                 project_id=uuid.uuid4(),
                 project_name="经济学",
@@ -377,6 +384,9 @@ class GenerationPipelineAPITests(unittest.TestCase):
             self.assertTrue(all(row[1] == 3 for row in version_rows))
             self.assertEqual(session.scalar(select(func.count(BulletPointSource.id))), 2)
             initial_job_count = session.scalar(select(func.count(GenerationJob.id)))
+            initial_page_count = session.scalar(select(func.count(DocumentPage.id)))
+            initial_parsed_page_count = session.scalar(select(func.count(ParsedPage.id)))
+            initial_chunk_count = session.scalar(select(func.count(TextChunk.id)))
 
         repeated = self.client.post(f"/api/v1/projects/{self.project_id}/generation-jobs")
         self.assertEqual(repeated.status_code, 202)
@@ -385,9 +395,10 @@ class GenerationPipelineAPITests(unittest.TestCase):
             self.assertEqual(session.scalar(select(func.count(GenerationJob.id))), initial_job_count)
             self.assertEqual(session.scalar(select(func.count(BulletPoint.id))), 2)
 
-        regenerated = self.client.post(
-            f"/api/v1/projects/{self.project_id}/generation-jobs?regenerate=true"
-        )
+        with patch("app.document.parser.PDFParser.parse", side_effect=AssertionError("PDF parsing must not run")):
+            regenerated = self.client.post(
+                f"/api/v1/projects/{self.project_id}/generation-jobs?regenerate=true"
+            )
         self.assertEqual(regenerated.status_code, 202, regenerated.text)
         self.assertNotEqual(regenerated.json()["id"], payload["id"])
         regenerated_status = self.client.get(
@@ -398,6 +409,9 @@ class GenerationPipelineAPITests(unittest.TestCase):
         with self.Session() as session:
             self.assertEqual(session.scalar(select(func.count(Chapter.id))), 1)
             self.assertEqual(session.scalar(select(func.count(BulletPoint.id))), 2)
+            self.assertEqual(session.scalar(select(func.count(DocumentPage.id))), initial_page_count)
+            self.assertEqual(session.scalar(select(func.count(ParsedPage.id))), initial_parsed_page_count)
+            self.assertEqual(session.scalar(select(func.count(TextChunk.id))), initial_chunk_count)
         print("GENERATION_JOB_RESULT=" + json.dumps(payload, ensure_ascii=False))
 
     def test_live_generation_endpoint_rejects_missing_key_without_mock_fallback(self) -> None:

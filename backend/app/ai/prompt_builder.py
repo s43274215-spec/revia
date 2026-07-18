@@ -14,18 +14,10 @@ class PromptPair:
 
 
 class PromptBuilder:
-    def build_item(
-        self,
-        *,
-        project_id: uuid.UUID,
-        project_name: str,
-        project_description: str | None,
-        syllabus_chapter: str | None,
-        syllabus_item: str,
-        candidates: list[CandidateChunk],
-    ) -> PromptPair:
-        unique_candidates = self._deduplicate_candidates(candidates)
-        source_context = json.dumps(
+    @staticmethod
+    def _source_context(candidates: list[CandidateChunk]) -> str:
+        unique_candidates = PromptBuilder._deduplicate_candidates(candidates)
+        return json.dumps(
             [
                 {
                     "chunk_id": str(candidate.chunk_id),
@@ -39,6 +31,18 @@ class PromptBuilder:
             ],
             ensure_ascii=False,
         )
+
+    def build_item(
+        self,
+        *,
+        project_id: uuid.UUID,
+        project_name: str,
+        project_description: str | None,
+        syllabus_chapter: str | None,
+        syllabus_item: str,
+        candidates: list[CandidateChunk],
+    ) -> PromptPair:
+        source_context = self._source_context(candidates)
         return PromptPair(
             system_prompt=render_prompt("item_system.txt"),
             user_prompt=render_prompt(
@@ -62,11 +66,22 @@ class PromptBuilder:
             unique.append(candidate)
         return unique
 
-    def build_repair(self, *, raw_output: str, validation_error: str) -> PromptPair:
+    def build_repair(
+        self,
+        *,
+        syllabus_chapter: str | None,
+        syllabus_item: str,
+        candidates: list[CandidateChunk],
+        raw_output: str,
+        validation_error: str,
+    ) -> PromptPair:
         return PromptPair(
             system_prompt=render_prompt("item_system.txt"),
             user_prompt=render_prompt(
                 "repair_item_json.txt",
+                syllabus_chapter=syllabus_chapter or "未识别章节",
+                syllabus_item=syllabus_item,
+                source_context=self._source_context(candidates),
                 validation_error=validation_error,
                 raw_output=raw_output,
             ),
