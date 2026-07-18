@@ -85,6 +85,26 @@ class GeneratedProject(BaseModel):
     chapters: list[GeneratedChapter] = Field(min_length=1)
 
 
+class RetrievalQueryRewrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    queries: list[str] = Field(max_length=5)
+
+    @field_validator("queries")
+    @classmethod
+    def queries_are_short_unique_phrases(cls, values: list[str]) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            cleaned = " ".join(value.split()).strip()
+            normalized = _normalize_title(cleaned)
+            if not normalized or len(cleaned) > 80 or normalized in seen:
+                continue
+            seen.add(normalized)
+            result.append(cleaned)
+        return result
+
+
 class GeneratedVersionPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

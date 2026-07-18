@@ -10,7 +10,9 @@ from sqlalchemy.orm import Session
 from app.ai.schemas import GeneratedItemResult
 from app.ai.service import AIService, ItemGenerationRequest
 from app.ai.validation import AIOutputValidationError
-from app.matching.schemas import CandidateChunk
+from app.matching.schemas import CandidateChunk, ItemMatch
+from app.matching.aliases import normalize_query_key
+from app.matching.query_planning import QueryPlan, SyllabusItemType
 from app.matching.service import MatchingService
 from app.models.content import BulletPoint, BulletPointSource, Chapter, ContentVersion, KnowledgePoint
 from app.models.document import ParsedDocument, TextChunk
@@ -162,14 +164,10 @@ class GenerationWorkflowService:
 
             chunks = self._project_chunks(project.id)
             self._set_status(job, GenerationStatus.MATCHING, progress=15)
-            matches = [
-                self._matching.match_item(
-                    syllabus_item=entry.title,
-                    syllabus_chapter=entry.chapter,
-                    chunks=chunks,
-                )
-                for entry in syllabus_items
-            ]
+            plans = self._matching.plan_items(syllabus_items)
+            matches = [self._matching.match_plan(plan=plan, chunks=chunks) for plan in plans]
+            plans, matches = await self._apply_query_rewrite_fallbacks(plans, matches, chunks)
+            matches = self._matching.resolve_dependent_matches(plans, matches)
             if not self._job_items(job.id):
                 self._db.add_all([
                     GenerationJobItem(
@@ -197,7 +195,7 @@ class GenerationWorkflowService:
                     self._complete_item_failure(
                         item,
                         failure_type="unmatched",
-                        reason=match.reason or "unmatched",
+                        reason=self._matching.failure_diagnostic(match),
                     )
                     self._record_progress(job)
                     continue
@@ -256,6 +254,35 @@ class GenerationWorkflowService:
             return self._fail(failed_job, failed_project, f"generation_failed: {self._safe_error(exc)}")
         finally:
             self._ensure_terminal_after_worker(job_id, project_id)
+
+    async def _apply_query_rewrite_fallbacks(
+        self,
+        plans: list[QueryPlan],
+        matches: list[ItemMatch],
+        chunks: list[TextChunk],
+    ) -> tuple[list[QueryPlan], list[ItemMatch]]:
+        if self._ai_service is None or self._matching is None:
+            return plans, matches
+        rewrite_cache: dict[str, list[str]] = {}
+        for index, (plan, match) in enumerate(zip(plans, matches, strict=True)):
+            if match.matched or plan.item_type != SyllabusItemType.KNOWLEDGE:
+                continue
+            cache_key = normalize_query_key(plan.original_query)
+            if cache_key not in rewrite_cache:
+                try:
+                    rewrite_cache[cache_key] = await self._ai_service.rewrite_retrieval_queries(
+                        syllabus_item=plan.original_query,
+                        hierarchy_context=list(filter(None, (
+                            plan.hierarchy_context.chapter,
+                            plan.hierarchy_context.parent_title,
+                            *plan.hierarchy_context.related_titles,
+                        ))),
+                    )
+                except Exception:
+                    rewrite_cache[cache_key] = []
+            plans[index] = plan.with_ai_queries(rewrite_cache[cache_key])
+            matches[index] = self._matching.match_plan(plan=plans[index], chunks=chunks)
+        return plans, matches
 
     def get_job(self, project_id: uuid.UUID, job_id: uuid.UUID) -> GenerationJob | None:
         project = self._project(project_id, lock=True)

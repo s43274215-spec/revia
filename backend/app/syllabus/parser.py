@@ -33,7 +33,10 @@ class SyllabusParser:
         r")(.+)$"
     )
     _meaningless_pattern = re.compile(r"^[\W_]+$", re.UNICODE)
-    _collection_pattern = re.compile(r"(?:特征|特点|类型|原则|步骤|流程|因素|模块|构成|内容|方法)(?:是|为|包括|包含|如下|[：:]?\s*$)")
+    _collection_pattern = re.compile(
+        r"(?:特征|特点|类型|原则|步骤|流程|因素|模块|构成|内容|方法)(?:是|为|包括|包含|如下|[：:]?\s*)$"
+        r"|^(?:各|经典|主要|核心).*(?:考点|理论|方法|模型)$"
+    )
 
     def parse(self, text: str) -> list[ParsedSyllabusSection]:
         sections: list[ParsedSyllabusSection] = []

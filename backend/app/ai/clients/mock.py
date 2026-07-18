@@ -7,6 +7,8 @@ from app.ai.clients.base import AIClient
 
 class MockAIClient(AIClient):
     async def generate_completion(self, *, system_prompt: str, user_prompt: str) -> str:
+        if "REVIA_QUERY_REWRITE_V1" in user_prompt:
+            return '{"queries":[]}'
         if "REVIA_ITEM_V2" in user_prompt:
             return self._generate_item(user_prompt)
         project_id = self._project_id_from(user_prompt)
