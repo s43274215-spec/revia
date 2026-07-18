@@ -24,9 +24,12 @@ export type GenerationJob = {
   item_failures: { syllabus_item: string; reason: string }[];
   status_history: GenerationStatus[];
   error_message: string | null;
+  successful_items: number | null;
+  failed_items: number | null;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
+  last_activity_at: string | null;
 };
 
 export type BackendContentVersion = { id: string; kind: "original" | "recitation" | "keywords"; title: string; content: string };
@@ -198,6 +201,10 @@ export function startGeneration(projectId: string, regenerate = false): Promise<
 
 export function getGenerationJob(projectId: string, jobId: string): Promise<GenerationJob> {
   return apiRequest<GenerationJob>(`/projects/${projectId}/generation-jobs/${jobId}`);
+}
+
+export function getLatestGenerationJob(projectId: string): Promise<GenerationJob | null> {
+  return apiRequest<GenerationJob | null>(`/projects/${projectId}/generation-jobs/latest`);
 }
 
 export function getLearningMaterial(projectId: string): Promise<LearningMaterialResponse> {

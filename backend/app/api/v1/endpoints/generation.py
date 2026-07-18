@@ -13,7 +13,7 @@ from app.core.config import Settings, get_settings
 from app.db.session import get_db
 from app.matching.service import MatchingService
 from app.schemas.project import GenerationJobRead
-from app.services.generation import GenerationWorkflowService, ProjectNotFoundError, find_generation_job
+from app.services.generation import GenerationWorkflowService, ProjectNotFoundError
 from app.settings.security import CredentialCipher, get_transport_key_pair
 from app.settings.service import DeepSeekSettingsService
 
@@ -24,9 +24,11 @@ def build_generation_service(
     db: Session,
     settings: Settings,
     workspace_id: uuid.UUID,
+    *,
+    initialize_ai: bool = True,
 ) -> GenerationWorkflowService:
     api_key = None
-    if settings.ai_mode == "live":
+    if initialize_ai and settings.ai_mode == "live":
         api_key = DeepSeekSettingsService(
             db=db,
             workspace_id=workspace_id,
@@ -34,20 +36,26 @@ def build_generation_service(
             cipher=CredentialCipher(settings.credential_encryption_key),
             transport=get_transport_key_pair(),
         ).read_api_key()
-    try:
-        client = build_ai_client(settings, api_key)
-    except AIConfigurationError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    ai_service = None
+    matching_service = None
+    if initialize_ai:
+        try:
+            client = build_ai_client(settings, api_key)
+        except AIConfigurationError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+        ai_service = AIService(client)
+        matching_service = MatchingService(
+            threshold=settings.matching_threshold,
+            max_candidates=settings.matching_max_candidates,
+        )
     provider_name = "mock" if settings.ai_mode == "mock" else settings.ai_provider
     return GenerationWorkflowService(
         db=db,
         workspace_id=workspace_id,
-        ai_service=AIService(client),
-        matching_service=MatchingService(
-            threshold=settings.matching_threshold,
-            max_candidates=settings.matching_max_candidates,
-        ),
+        ai_service=ai_service,
+        matching_service=matching_service,
         provider_name=provider_name,
+        stale_after_seconds=settings.generation_stale_seconds,
     )
 
 
@@ -96,14 +104,28 @@ async def start_generation(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
+@router.get("/{project_id}/generation-jobs/latest", response_model=GenerationJobRead | None)
+def get_latest_generation_job(
+    project_id: uuid.UUID,
+    workspace_id: WorkspaceId,
+    db: DbSession,
+    settings: RuntimeSettings,
+) -> GenerationJobRead | None:
+    service = build_generation_service(db, settings, workspace_id, initialize_ai=False)
+    job = service.get_latest_job(project_id)
+    return GenerationJobRead.model_validate(job) if job is not None else None
+
+
 @router.get("/{project_id}/generation-jobs/{job_id}", response_model=GenerationJobRead)
 def get_generation_job(
     project_id: uuid.UUID,
     job_id: uuid.UUID,
     workspace_id: WorkspaceId,
     db: DbSession,
+    settings: RuntimeSettings,
 ) -> GenerationJobRead:
-    job = find_generation_job(db, workspace_id, project_id, job_id)
+    service = build_generation_service(db, settings, workspace_id, initialize_ai=False)
+    job = service.get_job(project_id, job_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Generation job was not found")
     return GenerationJobRead.model_validate(job)

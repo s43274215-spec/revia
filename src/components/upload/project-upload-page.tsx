@@ -13,6 +13,7 @@ import {
   getActiveDocument,
   getDocumentProgress,
   getGenerationJob,
+  getLatestGenerationJob,
   getLatestDocument,
   getSyllabus,
   getLearningMaterial,
@@ -20,6 +21,7 @@ import {
   startGeneration,
   uploadPDF,
 } from "@/lib/revia-api";
+import { isTransientNetworkError, SinglePromiseGate } from "@/lib/generation-reliability";
 import { FileDropZone, SelectedPDF } from "./file-drop-zone";
 import { SettingsTrigger } from "@/components/settings/settings-trigger";
 import { useAuth } from "@/components/auth/auth-provider";
@@ -68,9 +70,12 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
   const [job, setJob] = useState<GenerationJob | null>(null);
   const [visibleStatus, setVisibleStatus] = useState<GenerationStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [generationReconnecting, setGenerationReconnecting] = useState(false);
   const [documentProgress, setDocumentProgress] = useState<DocumentProgress | null>(null);
   const [uploadStage, setUploadStage] = useState<"uploading" | "processing" | null>(null);
   const generationStartRequestedRef = useRef(false);
+  const generationStartGateRef = useRef(new SinglePromiseGate<GenerationJob>());
+  const generationAttemptedAtRef = useRef(0);
 
   const openLearningMaterial = useCallback(async (finishedJob: GenerationJob) => {
     if (finishedJob.status !== "completed" && finishedJob.status !== "partial_failed") return;
@@ -79,7 +84,9 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
   }, [projectId, router]);
 
   const beginJob = useCallback(async (regenerate: boolean) => {
-    const createdJob = await startGeneration(projectId, regenerate);
+    generationAttemptedAtRef.current = Date.now();
+    const createdJob = await generationStartGateRef.current.run(() => startGeneration(projectId, regenerate));
+    setGenerationReconnecting(false);
     setJob(createdJob);
     setVisibleStatus(createdJob.status);
     if (createdJob.status === "failed") setError(createdJob.error_message || "生成任务失败");
@@ -95,7 +102,8 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
     try {
       await beginJob(false);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "生成流程启动失败");
+      if (isTransientNetworkError(reason)) setGenerationReconnecting(true);
+      else setError(reason instanceof Error ? reason.message : "生成流程启动失败");
     }
   }, [beginJob]);
 
@@ -178,14 +186,28 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
   }, [documentProgress, projectId, resumeGenerationAfterParsing]);
 
   useEffect(() => {
-    if (!job || terminalStatuses.has(job.status)) return;
+    if ((!job && !generationReconnecting) || (job && terminalStatuses.has(job.status))) return;
     let active = true;
     const animationTimers: number[] = [];
-    const timer = window.setTimeout(async () => {
+    let timer = 0;
+    const poll = async () => {
       try {
-        const current = await getGenerationJob(projectId, job.id);
+        const current = job ? await getGenerationJob(projectId, job.id) : await getLatestGenerationJob(projectId);
         if (!active) return;
+        if (!current || (!job && Date.parse(current.created_at) < generationAttemptedAtRef.current - 10_000)) {
+          setGenerationReconnecting(true);
+          timer = window.setTimeout(poll, 1000);
+          return;
+        }
         if (terminalStatuses.has(current.status)) {
+          if (generationReconnecting) {
+            setGenerationReconnecting(false);
+            setJob(current);
+            setVisibleStatus(current.status);
+            if (current.status === "failed") setError(current.error_message || "生成任务失败");
+            if (current.status === "completed") await openLearningMaterial(current);
+            return;
+          }
           const sequence = current.status_history.filter((status, index, values) => status !== "pending" && values.indexOf(status) === index);
           sequence.forEach((status, index) => {
             animationTimers.push(window.setTimeout(() => { if (active) setVisibleStatus(status); }, index * 240));
@@ -197,19 +219,24 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
             if (current.status === "completed") await openLearningMaterial(current);
           }, sequence.length * 240));
         } else {
+          setGenerationReconnecting(false);
           setJob(current);
           setVisibleStatus(current.status);
+          timer = window.setTimeout(poll, 300);
         }
-      } catch (reason) {
-        if (active) setError(reason instanceof Error ? reason.message : "无法读取生成进度");
+      } catch {
+        if (!active) return;
+        setGenerationReconnecting(true);
+        timer = window.setTimeout(poll, 1000);
       }
-    }, 300);
+    };
+    timer = window.setTimeout(poll, generationReconnecting ? 1000 : 300);
     return () => {
       active = false;
       window.clearTimeout(timer);
       animationTimers.forEach((animationTimer) => window.clearTimeout(animationTimer));
     };
-  }, [job, openLearningMaterial, projectId]);
+  }, [generationReconnecting, job, openLearningMaterial, projectId]);
 
   const hasParsedCourse = documentProgress?.kind === "course_material" && documentProgress.processing_status === "parsed";
   const canGenerate = (courseFiles.length > 0 || hasParsedCourse) && (syllabusFiles.length > 0 || syllabusText.trim().length > 0);
@@ -218,6 +245,7 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
     if (!project || (!submitted && !canGenerate)) return;
     setGenerating(true);
     setError(null);
+    setGenerationReconnecting(false);
     try {
       const activeDocument = await getActiveDocument();
       if (activeDocument) {
@@ -249,6 +277,10 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
       await beginJob(Boolean(job?.status === "failed" || submitted));
     } catch (reason) {
       setUploadStage(null);
+      if (isTransientNetworkError(reason) && generationAttemptedAtRef.current > 0) {
+        setGenerationReconnecting(true);
+        return;
+      }
       const message = reason instanceof Error ? reason.message : "生成流程启动失败";
       const activeDocument = await getActiveDocument().catch(() => null);
       setError(activeDocument ? activeDocumentMessage(activeDocument) : message);
@@ -258,7 +290,9 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
   if (loadingProject) return <main className="entry-page entry-loading">正在读取项目…</main>;
   if (!project) return <main className="entry-page missing-project"><h1>未找到项目</h1><button onClick={() => router.push("/")}>返回项目列表</button></main>;
 
-  const statusLabel = uploadStage === "uploading"
+  const statusLabel = generationReconnecting
+    ? "正在重新连接"
+    : uploadStage === "uploading"
     ? "正在上传完整 PDF"
     : documentProgress?.processing_phase === "ocr"
       ? `正在 OCR 识别第 ${documentProgress.current_page || 0} / ${documentProgress.total_pages || "?"} 页`
@@ -313,7 +347,7 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
         </div>
         <div className="generate-area"><p>{canGenerate ? "资料准备完成，可以开始生成。" : "请上传课程资料，并上传或填写考纲。"}</p><button className="entry-primary generate-button" disabled={!canGenerate || generating} onClick={generate}>{generating ? <><i />正在生成复习材料…</> : "开始生成"}</button></div>
       </section>
-      {generating && <div className="generation-overlay" role="status"><div>{!error && !partialJob && <i />}<span>{statusLabel}</span><h2>{error ? "生成失败" : partialJob ? "复习材料已生成" : "生成复习材料"}</h2>{partialJob ? <div className="generation-partial"><p>已完成 {completedItemCount} 个考纲知识点的生成。</p><p>{partialJob.item_failures.length} 个知识点未在资料中找到足够依据：</p><ul>{partialJob.item_failures.map((failure) => <li key={failure.syllabus_item}>{conciseSyllabusItem(failure.syllabus_item)}</li>)}</ul><button className="entry-primary generate-button" onClick={() => openLearningMaterial(partialJob)}>进入已生成的学习材料</button></div> : <p>{error || progressDetail}</p>}{error && <button className="entry-primary generate-button" onClick={generate}>重新生成</button>}</div></div>}
+      {generating && <div className="generation-overlay" role="status"><div>{!error && !partialJob && <i />}<span>{statusLabel}</span><h2>{error ? "生成失败" : partialJob ? "复习材料已生成" : "生成复习材料"}</h2>{partialJob ? <div className="generation-partial"><p>已完成 {completedItemCount} 个考纲知识点的生成。</p><p>{partialJob.item_failures.length} 个知识点未在资料中找到足够依据：</p><ul>{partialJob.item_failures.map((failure) => <li key={failure.syllabus_item}>{conciseSyllabusItem(failure.syllabus_item)}</li>)}</ul><button className="entry-primary generate-button" onClick={() => openLearningMaterial(partialJob)}>进入已生成的学习材料</button></div> : <p>{error || (generationReconnecting ? "连接暂时中断，正在继续查询已有任务，不会重复创建。" : progressDetail)}</p>}{error && <button className="entry-primary generate-button" onClick={generate}>重新生成</button>}</div></div>}
     </main>
   );
 }

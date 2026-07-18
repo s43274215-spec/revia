@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     ai_timeout_seconds: float = 60.0
     ai_max_output_tokens: int = 4096
     ai_temperature: float = 0.1
+    generation_stale_seconds: int = 1200
     matching_threshold: float = 0.35
     matching_max_candidates: int = 6
     ocr_enabled: bool = True
@@ -104,8 +105,8 @@ class Settings(BaseSettings):
             self.global_rolling_24h_page_limit,
         ) <= 0:
             raise ValueError("Document quota limits must be positive integers")
-        if self.upload_url_expires_seconds <= 0 or self.document_lease_seconds <= 0:
-            raise ValueError("Upload URL and document lease durations must be positive")
+        if self.upload_url_expires_seconds <= 0 or self.document_lease_seconds <= 0 or self.generation_stale_seconds <= 0:
+            raise ValueError("Upload URL, document lease, and generation stale durations must be positive")
         if self.environment.casefold() == "production":
             required = {
                 "APP_ACCESS_CODE": self.app_access_code,

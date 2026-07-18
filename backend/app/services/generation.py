@@ -1,24 +1,45 @@
+import asyncio
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.ai.schemas import GeneratedItemResult
 from app.ai.service import AIService, ItemGenerationRequest
+from app.ai.validation import AIOutputValidationError
 from app.matching.schemas import CandidateChunk
 from app.matching.service import MatchingService
 from app.models.content import BulletPoint, BulletPointSource, Chapter, ContentVersion, KnowledgePoint
 from app.models.document import ParsedDocument, TextChunk
-from app.models.enums import ContentVersionKind, DocumentKind, GenerationStatus, ProjectStatus
-from app.models.project import Document, GenerationJob, Project
+from app.models.enums import ContentVersionKind, DocumentKind, GenerationItemStatus, GenerationStatus, ProjectStatus
+from app.models.project import Document, GenerationJob, GenerationJobItem, Project
 from app.services.knowledge_hierarchy import GeneratedRecord, organize_generated_records
 from app.syllabus.parser import SyllabusParser
 
 
 class ProjectNotFoundError(LookupError):
     pass
+
+
+_ACTIVE_JOB_STATUSES = (
+    GenerationStatus.PENDING,
+    GenerationStatus.PARSING,
+    GenerationStatus.MATCHING,
+    GenerationStatus.GENERATING,
+    GenerationStatus.VALIDATING,
+)
+_TERMINAL_JOB_STATUSES = (
+    GenerationStatus.COMPLETED,
+    GenerationStatus.PARTIAL_FAILED,
+    GenerationStatus.FAILED,
+)
+_TERMINAL_ITEM_STATUSES = (
+    GenerationItemStatus.SUCCEEDED.value,
+    GenerationItemStatus.FAILED.value,
+)
 
 
 def find_generation_job(
@@ -49,10 +70,11 @@ class GenerationWorkflowService:
         self,
         db: Session,
         workspace_id: uuid.UUID,
-        ai_service: AIService,
-        matching_service: MatchingService,
+        ai_service: AIService | None,
+        matching_service: MatchingService | None,
         provider_name: str,
         syllabus_parser: SyllabusParser | None = None,
+        stale_after_seconds: int = 1200,
     ) -> None:
         self._db = db
         self._workspace_id = workspace_id
@@ -60,6 +82,7 @@ class GenerationWorkflowService:
         self._matching = matching_service
         self._provider_name = provider_name
         self._syllabus_parser = syllabus_parser or SyllabusParser()
+        self._stale_after = timedelta(seconds=stale_after_seconds)
 
     async def start(self, project_id: uuid.UUID, *, regenerate: bool = False) -> GenerationJob:
         prepared = self.prepare(project_id, regenerate=regenerate)
@@ -68,13 +91,33 @@ class GenerationWorkflowService:
         return await self.process(project_id, prepared.job.id)
 
     def prepare(self, project_id: uuid.UUID, *, regenerate: bool = False) -> PreparedGeneration:
-        project = self._project(project_id)
+        project = self._project(project_id, lock=True)
         if project is None:
             raise ProjectNotFoundError(f"Project {project_id} was not found")
+
+        active_jobs = self._active_jobs(project_id)
+        for duplicate in active_jobs[1:]:
+            self._mark_failed(
+                duplicate,
+                project,
+                "superseded_concurrent_generation: another active generation job owns this project",
+            )
+        active = active_jobs[0] if active_jobs else None
+        if active is not None:
+            self._recover_job_locked(active, project)
+            if active.status in _ACTIVE_JOB_STATUSES:
+                project.status = ProjectStatus.PROCESSING
+                self._db.commit()
+                self._db.refresh(active)
+                return PreparedGeneration(job=active, should_process=False)
+
         existing = self._latest_reusable_job(project_id)
         if existing is not None and not regenerate:
+            self._db.commit()
+            self._db.refresh(existing)
             return PreparedGeneration(job=existing, should_process=False)
 
+        now = datetime.now(UTC)
         job = GenerationJob(
             project_id=project.id,
             status=GenerationStatus.PENDING,
@@ -84,7 +127,10 @@ class GenerationWorkflowService:
             total_items=0,
             item_failures=[],
             status_history=[GenerationStatus.PENDING.value],
-            started_at=datetime.now(UTC),
+            successful_items=0,
+            failed_items=0,
+            started_at=now,
+            last_activity_at=now,
         )
         project.status = ProjectStatus.PROCESSING
         self._db.add(job)
@@ -99,12 +145,17 @@ class GenerationWorkflowService:
             raise ProjectNotFoundError(f"Project {project_id} was not found")
         if job is None:
             raise LookupError(f"Generation job {job_id} was not found")
+        if self._ai_service is None or self._matching is None:
+            raise RuntimeError("Generation processing requires an initialized AI and matching service")
 
         try:
+            if job.status in _TERMINAL_JOB_STATUSES:
+                return job
             self._set_status(job, GenerationStatus.PARSING, progress=5)
             syllabus_text = project.syllabus.text if project.syllabus and project.syllabus.text else ""
             syllabus_items = self._syllabus_parser.flatten_hierarchy(syllabus_text)
             job.total_items = len(syllabus_items)
+            job.last_activity_at = datetime.now(UTC)
             self._db.commit()
             if not syllabus_items:
                 return self._fail(job, project, "No usable syllabus items were found")
@@ -119,17 +170,43 @@ class GenerationWorkflowService:
                 )
                 for entry in syllabus_items
             ]
-            self._db.commit()
+            if not self._job_items(job.id):
+                self._db.add_all([
+                    GenerationJobItem(
+                        job_id=job.id,
+                        position=index,
+                        syllabus_chapter=entry.chapter,
+                        syllabus_item=entry.title,
+                        parent_syllabus_item=entry.parent_title,
+                        status=GenerationItemStatus.PENDING.value,
+                    )
+                    for index, entry in enumerate(syllabus_items)
+                ])
+                self._db.commit()
 
-            records: list[GeneratedRecord] = []
-            failures: list[dict[str, str]] = []
             for index, match in enumerate(matches, start=1):
-                if not match.matched:
-                    failures.append({"syllabus_item": match.syllabus_item, "reason": match.reason or "unmatched"})
-                    self._record_progress(job, index, failures)
+                self._db.refresh(job)
+                if job.status in _TERMINAL_JOB_STATUSES:
+                    return job
+                item = self._job_item(job.id, index - 1)
+                if item is None:
+                    raise RuntimeError(f"generation checkpoint {index - 1} is missing")
+                if item.status in _TERMINAL_ITEM_STATUSES:
                     continue
-                self._set_status(job, GenerationStatus.GENERATING)
+                if not match.matched:
+                    self._complete_item_failure(
+                        item,
+                        failure_type="unmatched",
+                        reason=match.reason or "unmatched",
+                    )
+                    self._record_progress(job)
+                    continue
                 evidence = self._matching.select_generation_evidence(match=match, chunks=chunks)
+                item.status = GenerationItemStatus.PROCESSING.value
+                item.started_at = item.started_at or datetime.now(UTC)
+                item.candidates_payload = [candidate.model_dump(mode="json") for candidate in evidence]
+                self._set_status(job, GenerationStatus.GENERATING, commit=False)
+                self._db.commit()
                 try:
                     result = await self._ai_service.generate_item(
                         ItemGenerationRequest(
@@ -142,48 +219,100 @@ class GenerationWorkflowService:
                         ),
                         before_validation=lambda: self._set_status(job, GenerationStatus.VALIDATING),
                     )
-                    records.append(GeneratedRecord(
-                        syllabus_chapter=match.chapter,
-                        syllabus_item=match.syllabus_item,
-                        parent_syllabus_item=syllabus_items[index - 1].parent_title,
-                        result=result,
-                        candidates=evidence,
-                    ))
+                    self._db.refresh(job)
+                    if job.status in _TERMINAL_JOB_STATUSES:
+                        return job
+                    item = self._db.get(GenerationJobItem, item.id) or item
+                    item.status = GenerationItemStatus.SUCCEEDED.value
+                    item.result_payload = result.model_dump(mode="json")
+                    item.completed_at = datetime.now(UTC)
+                    item.error_message = None
+                    item.failure_type = None
+                    self._db.commit()
                 except Exception as exc:
-                    failures.append({"syllabus_item": match.syllabus_item, "reason": self._safe_error(exc)})
                     self._db.rollback()
                     job = self._db.get(GenerationJob, job.id) or job
                     project = self._db.get(Project, project.id) or project
-                self._record_progress(job, index, failures)
+                    item = self._db.get(GenerationJobItem, item.id) or item
+                    failure_type = "schema_validation" if isinstance(exc, AIOutputValidationError) else "generation_error"
+                    self._complete_item_failure(item, failure_type=failure_type, reason=self._safe_error(exc))
+                self._record_progress(job)
 
-            if not records:
-                return self._fail(job, project, "No syllabus item produced valid learning material", failures)
-
-            self._replace_learning_material(project, organize_generated_records(records))
-            project.status = ProjectStatus.COMPLETED
-            final_status = GenerationStatus.PARTIAL_FAILED if failures else GenerationStatus.COMPLETED
-            self._set_status(job, final_status, progress=100, commit=False)
-            job.processed_items = job.total_items
-            job.item_failures = failures
-            job.error_message = f"{len(failures)} syllabus item(s) failed" if failures else None
-            job.completed_at = datetime.now(UTC)
-            self._db.commit()
-            self._db.refresh(job)
-            return job
+            return self._finalize_from_checkpoints(job, project)
+        except asyncio.CancelledError:
+            self._db.rollback()
+            interrupted_job = self._db.get(GenerationJob, job.id) or job
+            interrupted_project = self._db.get(Project, project.id) or project
+            self._fail(
+                interrupted_job,
+                interrupted_project,
+                "stale_interrupted_generation: generation worker was cancelled before finalization",
+            )
+            raise
         except Exception as exc:
             self._db.rollback()
             failed_job = self._db.get(GenerationJob, job.id) or job
             failed_project = self._db.get(Project, project.id) or project
-            return self._fail(failed_job, failed_project, self._safe_error(exc))
+            return self._fail(failed_job, failed_project, f"generation_failed: {self._safe_error(exc)}")
+        finally:
+            self._ensure_terminal_after_worker(job_id, project_id)
 
     def get_job(self, project_id: uuid.UUID, job_id: uuid.UUID) -> GenerationJob | None:
-        return find_generation_job(self._db, self._workspace_id, project_id, job_id)
+        project = self._project(project_id, lock=True)
+        if project is None:
+            return None
+        job = find_generation_job(self._db, self._workspace_id, project_id, job_id)
+        if job is None:
+            self._db.rollback()
+            return None
+        self._recover_job_locked(job, project)
+        self._db.commit()
+        self._db.refresh(job)
+        return job
 
-    def _project(self, project_id: uuid.UUID) -> Project | None:
-        return self._db.scalar(select(Project).where(
+    def get_latest_job(self, project_id: uuid.UUID) -> GenerationJob | None:
+        project = self._project(project_id, lock=True)
+        if project is None:
+            return None
+        jobs = self._active_jobs(project_id)
+        for duplicate in jobs[1:]:
+            self._mark_failed(
+                duplicate,
+                project,
+                "superseded_concurrent_generation: another active generation job owns this project",
+            )
+        if jobs:
+            self._recover_job_locked(jobs[0], project)
+        latest = self._db.scalar(
+            select(GenerationJob)
+            .where(GenerationJob.project_id == project_id)
+            .order_by(GenerationJob.started_at.desc(), GenerationJob.created_at.desc())
+            .limit(1)
+        )
+        self._db.commit()
+        if latest is not None:
+            self._db.refresh(latest)
+        return latest
+
+    def _project(self, project_id: uuid.UUID, *, lock: bool = False) -> Project | None:
+        statement = select(Project).where(
             Project.id == project_id,
             Project.workspace_id == self._workspace_id,
-        ))
+        )
+        if lock:
+            statement = statement.with_for_update()
+        return self._db.scalar(statement)
+
+    def _active_jobs(self, project_id: uuid.UUID) -> list[GenerationJob]:
+        return list(self._db.scalars(
+            select(GenerationJob)
+            .where(
+                GenerationJob.project_id == project_id,
+                GenerationJob.status.in_(_ACTIVE_JOB_STATUSES),
+            )
+            .order_by(GenerationJob.started_at.desc(), GenerationJob.created_at.desc())
+            .with_for_update()
+        ).all())
 
     def _latest_reusable_job(self, project_id: uuid.UUID) -> GenerationJob | None:
         return self._db.scalar(
@@ -192,15 +321,7 @@ class GenerationWorkflowService:
             .where(
                 GenerationJob.project_id == project_id,
                 Project.workspace_id == self._workspace_id,
-                GenerationJob.status.in_([
-                    GenerationStatus.PENDING,
-                    GenerationStatus.PARSING,
-                    GenerationStatus.MATCHING,
-                    GenerationStatus.GENERATING,
-                    GenerationStatus.VALIDATING,
-                    GenerationStatus.COMPLETED,
-                    GenerationStatus.PARTIAL_FAILED,
-                ]),
+                GenerationJob.status.in_([GenerationStatus.COMPLETED, GenerationStatus.PARTIAL_FAILED]),
             )
             .order_by(GenerationJob.started_at.desc(), GenerationJob.created_at.desc())
             .limit(1)
@@ -227,6 +348,10 @@ class GenerationWorkflowService:
         progress: int | None = None,
         commit: bool = True,
     ) -> None:
+        if status in _ACTIVE_JOB_STATUSES:
+            self._db.refresh(job)
+            if job.status in _TERMINAL_JOB_STATUSES:
+                return
         job.status = status
         history = list(job.status_history or [])
         if not history or history[-1] != status.value:
@@ -234,19 +359,89 @@ class GenerationWorkflowService:
         job.status_history = history
         if progress is not None:
             job.progress = progress
+        job.last_activity_at = datetime.now(UTC)
         if commit:
             self._db.commit()
 
-    def _record_progress(
+    def _record_progress(self, job: GenerationJob) -> None:
+        self._db.flush()
+        items = self._job_items(job.id)
+        terminal = [item for item in items if item.status in _TERMINAL_ITEM_STATUSES]
+        failures = self._item_failures(items)
+        job.processed_items = len(terminal)
+        job.successful_items = sum(item.status == GenerationItemStatus.SUCCEEDED.value for item in terminal)
+        job.failed_items = len(failures)
+        job.item_failures = failures
+        job.progress = min(95, 20 + int(75 * len(terminal) / max(job.total_items, 1)))
+        job.last_activity_at = datetime.now(UTC)
+        self._db.commit()
+
+    def _finalize_from_checkpoints(
         self,
         job: GenerationJob,
-        processed: int,
-        failures: list[dict[str, str]],
-    ) -> None:
-        job.processed_items = processed
-        job.item_failures = list(failures)
-        job.progress = min(95, 20 + int(75 * processed / max(job.total_items, 1)))
-        self._db.commit()
+        project: Project,
+        *,
+        commit: bool = True,
+    ) -> GenerationJob:
+        locked_project = self._project(project.id, lock=True)
+        if locked_project is None:
+            raise ProjectNotFoundError(f"Project {project.id} was not found")
+        project = locked_project
+        self._db.refresh(job)
+        if job.status in _TERMINAL_JOB_STATUSES:
+            return job
+        items = self._job_items(job.id)
+        if len(items) != job.total_items or any(item.status not in _TERMINAL_ITEM_STATUSES for item in items):
+            raise RuntimeError("generation_finalization_incomplete: not every syllabus item is terminal")
+        failures = self._item_failures(items)
+        succeeded = [item for item in items if item.status == GenerationItemStatus.SUCCEEDED.value]
+        if not succeeded:
+            self._mark_failed(job, project, "generation_failed: no syllabus item produced valid learning material", failures)
+            if commit:
+                self._db.commit()
+                self._db.refresh(job)
+            return job
+
+        try:
+            records = [self._record_from_item(item) for item in succeeded]
+            organized = organize_generated_records(records)
+            with self._db.begin_nested():
+                self._replace_learning_material(project, organized)
+                self._db.flush()
+        except Exception as exc:
+            self._mark_failed(
+                job,
+                project,
+                f"finalization_failed: {self._safe_error(exc)}",
+                failures,
+            )
+            if commit:
+                self._db.commit()
+                self._db.refresh(job)
+            return job
+
+        success_count = len(succeeded)
+        failure_count = len(failures)
+        project.status = ProjectStatus.COMPLETED
+        job.processed_items = job.total_items
+        job.successful_items = success_count
+        job.failed_items = failure_count
+        job.item_failures = failures
+        job.completed_at = datetime.now(UTC)
+        job.last_activity_at = job.completed_at
+        if failures:
+            summary = self._failure_summary(items)
+            job.error_message = (
+                f"generation_partial_failed: {success_count} succeeded, {failure_count} failed ({summary})"
+            )
+            self._set_status(job, GenerationStatus.PARTIAL_FAILED, progress=100, commit=False)
+        else:
+            job.error_message = None
+            self._set_status(job, GenerationStatus.COMPLETED, progress=100, commit=False)
+        if commit:
+            self._db.commit()
+            self._db.refresh(job)
+        return job
 
     def _fail(
         self,
@@ -255,15 +450,123 @@ class GenerationWorkflowService:
         message: str,
         failures: list[dict[str, str]] | None = None,
     ) -> GenerationJob:
-        project.status = ProjectStatus.COMPLETED if project.chapters else ProjectStatus.FAILED
-        job.item_failures = list(failures or job.item_failures or [])
-        job.error_message = message
-        job.completed_at = datetime.now(UTC)
-        job.progress = 100
-        self._set_status(job, GenerationStatus.FAILED, progress=100, commit=False)
+        self._mark_failed(job, project, message, failures)
         self._db.commit()
         self._db.refresh(job)
         return job
+
+    def _mark_failed(
+        self,
+        job: GenerationJob,
+        project: Project,
+        message: str,
+        failures: list[dict[str, str]] | None = None,
+    ) -> None:
+        project.status = ProjectStatus.COMPLETED if project.chapters else ProjectStatus.FAILED
+        job.item_failures = list(failures or job.item_failures or [])
+        job.successful_items = max(0, int(job.processed_items or 0) - len(job.item_failures))
+        job.failed_items = len(job.item_failures)
+        job.error_message = message
+        job.completed_at = datetime.now(UTC)
+        job.last_activity_at = job.completed_at
+        job.progress = 100
+        self._set_status(job, GenerationStatus.FAILED, progress=100, commit=False)
+
+    def _recover_job_locked(self, job: GenerationJob, project: Project) -> None:
+        if job.status in _TERMINAL_JOB_STATUSES:
+            return
+        items = self._job_items(job.id)
+        if items and len(items) == job.total_items and all(
+            item.status in _TERMINAL_ITEM_STATUSES for item in items
+        ):
+            self._finalize_from_checkpoints(job, project, commit=False)
+            return
+        if self._is_stale(job, items):
+            self._mark_failed(
+                job,
+                project,
+                "stale_interrupted_generation: no generation activity was recorded before the recovery deadline",
+                self._item_failures(items),
+            )
+
+    def _is_stale(self, job: GenerationJob, items: list[GenerationJobItem]) -> bool:
+        activity = [job.last_activity_at]
+        activity.extend(item.updated_at or item.completed_at or item.started_at for item in items)
+        latest = max(
+            (self._utc(value) for value in activity if value is not None),
+            default=self._utc(job.started_at or job.created_at),
+        )
+        return datetime.now(UTC) - latest >= self._stale_after
+
+    def _ensure_terminal_after_worker(self, job_id: uuid.UUID, project_id: uuid.UUID) -> None:
+        try:
+            self._db.rollback()
+            job = find_generation_job(self._db, self._workspace_id, project_id, job_id)
+            if job is None or job.status in _TERMINAL_JOB_STATUSES:
+                return
+            project = self._project(project_id)
+            if project is not None:
+                self._fail(
+                    job,
+                    project,
+                    "generation_finalization_incomplete: generation worker exited without a terminal state",
+                )
+        except Exception:
+            self._db.rollback()
+
+    def _job_items(self, job_id: uuid.UUID) -> list[GenerationJobItem]:
+        return list(self._db.scalars(
+            select(GenerationJobItem)
+            .where(GenerationJobItem.job_id == job_id)
+            .order_by(GenerationJobItem.position)
+        ).all())
+
+    def _job_item(self, job_id: uuid.UUID, position: int) -> GenerationJobItem | None:
+        return self._db.scalar(select(GenerationJobItem).where(
+            GenerationJobItem.job_id == job_id,
+            GenerationJobItem.position == position,
+        ))
+
+    @staticmethod
+    def _complete_item_failure(item: GenerationJobItem, *, failure_type: str, reason: str) -> None:
+        item.status = GenerationItemStatus.FAILED.value
+        item.failure_type = failure_type
+        item.error_message = reason
+        item.completed_at = datetime.now(UTC)
+
+    @staticmethod
+    def _item_failures(items: list[GenerationJobItem]) -> list[dict[str, str]]:
+        return [
+            {"syllabus_item": item.syllabus_item, "reason": item.error_message or item.failure_type or "failed"}
+            for item in items
+            if item.status == GenerationItemStatus.FAILED.value
+        ]
+
+    @staticmethod
+    def _failure_summary(items: list[GenerationJobItem]) -> str:
+        counts: dict[str, int] = {}
+        for item in items:
+            if item.status != GenerationItemStatus.FAILED.value:
+                continue
+            key = item.failure_type or "unknown"
+            counts[key] = counts.get(key, 0) + 1
+        return ", ".join(f"{key}={value}" for key, value in sorted(counts.items())) or "none"
+
+    @staticmethod
+    def _record_from_item(item: GenerationJobItem) -> GeneratedRecord:
+        if item.result_payload is None or item.candidates_payload is None:
+            raise RuntimeError(f"successful generation checkpoint {item.position} has no durable result")
+        return GeneratedRecord(
+            syllabus_chapter=item.syllabus_chapter,
+            syllabus_item=item.syllabus_item,
+            parent_syllabus_item=item.parent_syllabus_item,
+            result=GeneratedItemResult.model_validate(item.result_payload),
+            candidates=[CandidateChunk.model_validate(candidate) for candidate in item.candidates_payload],
+        )
+
+    @staticmethod
+    def _utc(value: datetime) -> datetime:
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
     def _replace_learning_material(self, project: Project, records: list[GeneratedRecord]) -> None:
         project.chapters.clear()
