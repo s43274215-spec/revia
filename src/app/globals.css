@@ -73,7 +73,14 @@ button:focus-visible,input:focus-visible { outline:2px solid color-mix(in srgb,v
 .reading-document h2 { margin:0 0 46px; padding-bottom:17px; border-bottom:1px solid var(--line); font-size:26px; font-weight:600; }
 .knowledge-section { scroll-margin-top:28px; margin-bottom:52px; }
 .reading-document h3 { margin:0 0 20px; font-size:18px; font-weight:600; }
-.knowledge-section>p { margin:0 0 16px; color:#4b4e4a; font-size:16px; line-height:2; text-align:justify; }
+.bullet-point-list { margin:0; padding-left:24px; }
+.bullet-point-list.is-single { padding-left:0; list-style:none; }
+.bullet-point { margin:0 0 28px; padding-left:8px; color:#4b4e4a; }
+.bullet-point::marker { color:#7f9187; font-family:Georgia,serif; font-size:13px; }
+.reading-document h4 { margin:0 0 11px; color:#3f4540; font-size:15px; font-weight:600; line-height:1.6; }
+.bullet-content>p { margin:0 0 13px; color:#4b4e4a; font-size:16px; line-height:2; text-align:justify; }
+.content-list { margin:0 0 15px; padding-left:24px; color:#4b4e4a; font-size:16px; line-height:2; }
+.content-list li { margin-bottom:7px; padding-left:5px; }
 mark { padding:1px 2px; background:#dfe9e3; color:inherit; }
 .keyword-lines { border-top:1px solid var(--line); }
 .keyword-lines button { display:grid; grid-template-columns:34px minmax(0,1fr) auto; align-items:center; gap:12px; width:100%; min-height:58px; padding:0 4px; border:0; border-bottom:1px solid var(--line); background:transparent; text-align:left; cursor:pointer; }

@@ -32,7 +32,7 @@ export function OutlineSidebar({ project, progress, onNavigate }: { project: Pro
           <div className="outline-chapter" key={chapter.id}>
             <button onClick={() => onNavigate(chapter.id)}><span>{chapter.number}</span>{chapter.title}</button>
             <div className="outline-points">
-              {chapter.points.map((point) => <button key={point.id} onClick={() => onNavigate(point.id)}>{point.versions.original.title}</button>)}
+              {chapter.points.map((point) => <button key={point.id} onClick={() => onNavigate(point.id)}>{point.title}</button>)}
             </div>
           </div>
         ))}

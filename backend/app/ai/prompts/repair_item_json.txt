@@ -10,7 +10,7 @@ SOURCE_CONTEXT_JSON_END
 
 只返回符合现有 Schema 的单个 JSON 对象，不要返回 Markdown 或解释文字。
 
-只修复 JSON 语法、字段结构和校验指出的格式问题，不得添加、删减或改写原有内容事实。允许缩短重复标题、统一三个版本标题、删除纯 OCR 噪声、调整关键词分隔与数量。不要解释，严格输出修复后的单个 JSON 对象。
+只修复 JSON 语法、字段结构和校验指出的格式问题，不得添加、删减或改写原有内容事实。允许缩短重复标题、统一三个版本标题、删除纯 OCR 噪声、调整关键词分隔与数量。集合类主题若把多个带编号分项塞进一个 content，必须按分项拆成多个 bullet_points，并让每个 bullet 保留支持自己的来源。不要解释，严格输出修复后的单个 JSON 对象。
 目标结构必须且只能包含：knowledge_point_title；bullet_points 数组；每个要点包含 title、original、recitation、keywords、source_chunk_ids、source_pages；三个版本分别只包含 title 与 content。
 
 标题不得为空或超过 25 个汉字；子标题不得包含完整父标题；bullet title 与三个版本 title 必须完全相同；keywords 必须为 3—8 个不重复关键词或短语。

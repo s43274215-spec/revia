@@ -6,7 +6,6 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.ai.schemas import GeneratedItemResult
 from app.ai.service import AIService, ItemGenerationRequest
 from app.matching.schemas import CandidateChunk
 from app.matching.service import MatchingService
@@ -14,6 +13,7 @@ from app.models.content import BulletPoint, BulletPointSource, Chapter, ContentV
 from app.models.document import ParsedDocument, TextChunk
 from app.models.enums import ContentVersionKind, DocumentKind, GenerationStatus, ProjectStatus
 from app.models.project import Document, GenerationJob, Project
+from app.services.knowledge_hierarchy import GeneratedRecord, organize_generated_records
 from app.syllabus.parser import SyllabusParser
 
 
@@ -36,14 +36,6 @@ def find_generation_job(
             Project.workspace_id == workspace_id,
         )
     )
-
-
-@dataclass(frozen=True)
-class GeneratedRecord:
-    syllabus_chapter: str | None
-    syllabus_item: str
-    result: GeneratedItemResult
-    candidates: list[CandidateChunk]
 
 
 @dataclass(frozen=True)
@@ -111,7 +103,7 @@ class GenerationWorkflowService:
         try:
             self._set_status(job, GenerationStatus.PARSING, progress=5)
             syllabus_text = project.syllabus.text if project.syllabus and project.syllabus.text else ""
-            syllabus_items = self._syllabus_parser.flatten(syllabus_text)
+            syllabus_items = self._syllabus_parser.flatten_hierarchy(syllabus_text)
             job.total_items = len(syllabus_items)
             self._db.commit()
             if not syllabus_items:
@@ -121,11 +113,11 @@ class GenerationWorkflowService:
             self._set_status(job, GenerationStatus.MATCHING, progress=15)
             matches = [
                 self._matching.match_item(
-                    syllabus_item=item,
-                    syllabus_chapter=chapter,
+                    syllabus_item=entry.title,
+                    syllabus_chapter=entry.chapter,
                     chunks=chunks,
                 )
-                for chapter, item in syllabus_items
+                for entry in syllabus_items
             ]
             self._db.commit()
 
@@ -153,6 +145,7 @@ class GenerationWorkflowService:
                     records.append(GeneratedRecord(
                         syllabus_chapter=match.chapter,
                         syllabus_item=match.syllabus_item,
+                        parent_syllabus_item=syllabus_items[index - 1].parent_title,
                         result=result,
                         candidates=evidence,
                     ))
@@ -166,7 +159,7 @@ class GenerationWorkflowService:
             if not records:
                 return self._fail(job, project, "No syllabus item produced valid learning material", failures)
 
-            self._replace_learning_material(project, records)
+            self._replace_learning_material(project, organize_generated_records(records))
             project.status = ProjectStatus.COMPLETED
             final_status = GenerationStatus.PARTIAL_FAILED if failures else GenerationStatus.COMPLETED
             self._set_status(job, final_status, progress=100, commit=False)
@@ -262,7 +255,7 @@ class GenerationWorkflowService:
         message: str,
         failures: list[dict[str, str]] | None = None,
     ) -> GenerationJob:
-        project.status = ProjectStatus.FAILED
+        project.status = ProjectStatus.COMPLETED if project.chapters else ProjectStatus.FAILED
         job.item_failures = list(failures or job.item_failures or [])
         job.error_message = message
         job.completed_at = datetime.now(UTC)

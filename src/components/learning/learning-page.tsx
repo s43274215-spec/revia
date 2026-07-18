@@ -3,7 +3,7 @@
 import { MouseEvent, UIEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ContextMenu, MenuState } from "./context-menu";
-import { KnowledgePoint, PointVersions, Project, Version, VersionPoint } from "./data";
+import { BulletPoint, PointVersions, Project, Version, VersionPoint } from "./data";
 import { DrawerState, OperationDrawer } from "./keyword-drawer";
 import { ReadingContent } from "./reading-content";
 import { OutlineSidebar, ProjectSidebar } from "./sidebars";
@@ -25,8 +25,8 @@ const generationStatusLabels: Record<GenerationStatus, string> = {
   failed: "重新生成失败",
 };
 
-function updatePoint(projects: Project[], projectId: string, pointId: string, update: (point: KnowledgePoint) => KnowledgePoint) {
-  return projects.map((project) => project.id !== projectId ? project : ({ ...project, chapters: project.chapters.map((chapter) => ({ ...chapter, points: chapter.points.map((point) => point.id === pointId ? update(point) : point) })) }));
+function updatePoint(projects: Project[], projectId: string, pointId: string, update: (point: BulletPoint) => BulletPoint) {
+  return projects.map((project) => project.id !== projectId ? project : ({ ...project, chapters: project.chapters.map((chapter) => ({ ...chapter, points: chapter.points.map((knowledgePoint) => ({ ...knowledgePoint, bulletPoints: knowledgePoint.bulletPoints.map((point) => point.id === pointId ? update(point) : point) })) })) }));
 }
 
 export function LearningPage({ projectId }: { projectId: string }) {
@@ -131,10 +131,10 @@ export function LearningPage({ projectId }: { projectId: string }) {
     if (readingArea) requestAnimationFrame(() => { readingArea.scrollTop = 0; readingArea.style.removeProperty("scroll-behavior"); calculateProgress(readingArea); });
   };
   const navigate = (id: string) => readingRef.current?.querySelector<HTMLElement>(`#${CSS.escape(id)}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
-  const openContext = (event: MouseEvent, point: KnowledgePoint) => { event.preventDefault(); const width = 168; const height = 100; setMenu({ pointId: point.id, x: Math.min(event.clientX, window.innerWidth - width - 8), y: Math.min(event.clientY, window.innerHeight - height - 8) }); };
-  const selectedPoint = activeProject?.chapters.flatMap((chapter) => chapter.points).find((point) => point.id === menu?.pointId);
+  const openContext = (event: MouseEvent, point: BulletPoint) => { event.preventDefault(); const width = 168; const height = 100; setMenu({ pointId: point.id, x: Math.min(event.clientX, window.innerWidth - width - 8), y: Math.min(event.clientY, window.innerHeight - height - 8) }); };
+  const selectedPoint = activeProject?.chapters.flatMap((chapter) => chapter.points.flatMap((point) => point.bulletPoints)).find((point) => point.id === menu?.pointId);
   const edit = (mode: "single" | "global") => { if (selectedPoint) setDrawer({ mode, point: selectedPoint, version }); setMenu(null); };
-  const remove = () => { if (!activeProject || !menu) return; const next = history.present.map((project) => project.id !== activeProject.id ? project : ({ ...project, chapters: project.chapters.map((chapter) => ({ ...chapter, points: chapter.points.filter((point) => point.id !== menu.pointId) })) })); commit(next); setMenu(null); };
+  const remove = () => { if (!activeProject || !menu) return; const next = history.present.map((project) => project.id !== activeProject.id ? project : ({ ...project, chapters: project.chapters.map((chapter) => ({ ...chapter, points: chapter.points.map((point) => ({ ...point, bulletPoints: point.bulletPoints.filter((bullet) => bullet.id !== menu.pointId) })).filter((point) => point.bulletPoints.length > 0) })) })); commit(next); setMenu(null); };
   const saveSingle = (pointId: string, editedVersion: Version, value: VersionPoint) => { if (!activeProject) return; commit(updatePoint(history.present, activeProject.id, pointId, (point) => ({ ...point, versions: { ...point.versions, [editedVersion]: value } }))); setDrawer(null); };
   const saveGlobal = (pointId: string, versions: PointVersions) => { if (!activeProject) return; commit(updatePoint(history.present, activeProject.id, pointId, (point) => ({ ...point, versions }))); setDrawer(null); };
   const regenerate = async () => {
