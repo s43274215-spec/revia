@@ -99,7 +99,7 @@ class GenerationJob(Base):
     progress: Mapped[int] = mapped_column(Integer, default=0)
     processed_items: Mapped[int] = mapped_column(Integer, default=0)
     total_items: Mapped[int] = mapped_column(Integer, default=0)
-    item_failures: Mapped[list[dict[str, str]]] = mapped_column(JSON, default=list)
+    item_failures: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
     status_history: Mapped[list[str]] = mapped_column(JSON, default=list)
     error_message: Mapped[str | None] = mapped_column(Text)
     successful_items: Mapped[int | None] = mapped_column(Integer)

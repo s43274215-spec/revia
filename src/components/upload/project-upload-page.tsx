@@ -22,6 +22,7 @@ import {
   uploadPDF,
 } from "@/lib/revia-api";
 import { isTransientNetworkError, SinglePromiseGate } from "@/lib/generation-reliability";
+import { generationFailureCounts, generationFailureLabel, generationFailureReason, successfulGenerationCount } from "@/lib/generation-failures";
 import { FileDropZone, SelectedPDF } from "./file-drop-zone";
 import { SettingsTrigger } from "@/components/settings/settings-trigger";
 import { useAuth } from "@/components/auth/auth-provider";
@@ -318,8 +319,9 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
       : "正在上传、解析并组织学习内容，请稍候。";
   const partialJob = job?.status === "partial_failed" ? job : null;
   const completedItemCount = partialJob
-    ? Math.max(0, partialJob.total_items - partialJob.item_failures.length)
+    ? successfulGenerationCount(partialJob)
     : 0;
+  const partialFailureCounts = partialJob ? generationFailureCounts(partialJob.item_failures) : null;
 
   return (
     <main className="entry-page upload-page">
@@ -347,7 +349,7 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
         </div>
         <div className="generate-area"><p>{canGenerate ? "资料准备完成，可以开始生成。" : "请上传课程资料，并上传或填写考纲。"}</p><button className="entry-primary generate-button" disabled={!canGenerate || generating} onClick={generate}>{generating ? <><i />正在生成复习材料…</> : "开始生成"}</button></div>
       </section>
-      {generating && <div className="generation-overlay" role="status"><div>{!error && !partialJob && <i />}<span>{statusLabel}</span><h2>{error ? "生成失败" : partialJob ? "复习材料已生成" : "生成复习材料"}</h2>{partialJob ? <div className="generation-partial"><p>已完成 {completedItemCount} 个考纲知识点的生成。</p><p>{partialJob.item_failures.length} 个知识点未在资料中找到足够依据：</p><ul>{partialJob.item_failures.map((failure) => <li key={failure.syllabus_item}>{conciseSyllabusItem(failure.syllabus_item)}</li>)}</ul><button className="entry-primary generate-button" onClick={() => openLearningMaterial(partialJob)}>进入已生成的学习材料</button></div> : <p>{error || (generationReconnecting ? "连接暂时中断，正在继续查询已有任务，不会重复创建。" : progressDetail)}</p>}{error && <button className="entry-primary generate-button" onClick={generate}>重新生成</button>}</div></div>}
+      {generating && <div className="generation-overlay" role="status"><div>{!error && !partialJob && <i />}<span>{statusLabel}</span><h2>{error ? "生成失败" : partialJob ? "复习材料已生成" : "生成复习材料"}</h2>{partialJob && partialFailureCounts ? <div className="generation-partial"><p>已完成 {completedItemCount} / {partialJob.total_items} 个考纲知识点的生成。</p><p>{partialFailureCounts.unmatched > 0 && `${partialFailureCounts.unmatched} 个未找到资料依据`}{partialFailureCounts.unmatched > 0 && partialFailureCounts.schema_validation > 0 && " · "}{partialFailureCounts.schema_validation > 0 && `${partialFailureCounts.schema_validation} 个未通过格式检查`}{partialFailureCounts.generation_error > 0 && ` · ${partialFailureCounts.generation_error} 个生成未完成`}。</p><details className="partial-failure-details"><summary>查看 {partialJob.item_failures.length} 个未生成考点及原因</summary><ul>{partialJob.item_failures.map((failure, index) => <li key={`${failure.position ?? index}-${failure.syllabus_item}`}><strong>{conciseSyllabusItem(failure.syllabus_item)}</strong><span>{generationFailureLabel(failure)} · {generationFailureReason(failure)}</span></li>)}</ul></details><button className="entry-primary generate-button" onClick={() => openLearningMaterial(partialJob)}>进入已生成的学习材料</button></div> : <p>{error || (generationReconnecting ? "连接暂时中断，正在继续查询已有任务，不会重复创建。" : progressDetail)}</p>}{error && <button className="entry-primary generate-button" onClick={generate}>重新生成</button>}</div></div>}
     </main>
   );
 }

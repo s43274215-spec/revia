@@ -1,6 +1,11 @@
+"use client";
+
+import { useState } from "react";
 import { Chapter, Project } from "./data";
 import { Icon } from "./icons";
 import { SettingsTrigger } from "@/components/settings/settings-trigger";
+import { generationFailureLabel, generationFailureReason } from "@/lib/generation-failures";
+import type { GenerationJob } from "@/lib/revia-api";
 
 export function ProjectSidebar({ projects, activeProjectId, onSelect }: { projects: Project[]; activeProjectId: string | null; onSelect: (id: string) => void }) {
   return (
@@ -23,7 +28,10 @@ export function ProjectSidebar({ projects, activeProjectId, onSelect }: { projec
   );
 }
 
-export function OutlineSidebar({ project, progress, onNavigate }: { project: Project; progress: number; onNavigate: (id: string) => void }) {
+export function OutlineSidebar({ project, progress, onNavigate, partialJob }: { project: Project; progress: number; onNavigate: (id: string) => void; partialJob: GenerationJob | null }) {
+  const [expandedFailure, setExpandedFailure] = useState<number | null>(null);
+  const failures = partialJob?.item_failures ?? [];
+
   return (
     <aside className="outline-sidebar" aria-label="本页目录">
       <div className="outline-heading"><p>{project.name}</p><span>课程目录</span></div>
@@ -36,6 +44,22 @@ export function OutlineSidebar({ project, progress, onNavigate }: { project: Pro
             </div>
           </div>
         ))}
+        {failures.length > 0 && <section className="outline-missing" aria-labelledby="missing-outline-title">
+          <div className="outline-missing-heading"><strong id="missing-outline-title">未生成考点</strong><span>{failures.length}</span></div>
+          <p>这些考点保留在目录中，点击可查看原因。</p>
+          <ol>
+            {failures.map((failure, index) => {
+              const expanded = expandedFailure === index;
+              return <li key={`${failure.position ?? index}-${failure.syllabus_item}`}>
+                <button title={failure.syllabus_item} aria-expanded={expanded} onClick={() => setExpandedFailure(expanded ? null : index)}>
+                  <span aria-hidden="true" />
+                  <span>{failure.syllabus_item}</span>
+                </button>
+                {expanded && <div className="outline-missing-reason" role="status"><strong>{generationFailureLabel(failure)}</strong><p>{generationFailureReason(failure)}</p></div>}
+              </li>;
+            })}
+          </ol>
+        </section>}
       </nav>
       <div className="reading-progress">
         <span>阅读进度</span><strong>{progress}%</strong>

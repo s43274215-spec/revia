@@ -80,6 +80,15 @@ class SyllabusRead(BaseModel):
     updated_at: datetime
 
 
+class GenerationItemFailureRead(BaseModel):
+    syllabus_item: str
+    reason: str
+    failure_type: str | None = None
+    position: int | None = None
+    syllabus_chapter: str | None = None
+    parent_syllabus_item: str | None = None
+
+
 class GenerationJobRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -90,7 +99,7 @@ class GenerationJobRead(BaseModel):
     progress: int
     processed_items: int
     total_items: int
-    item_failures: list[dict[str, str]]
+    item_failures: list[GenerationItemFailureRead]
     status_history: list[str]
     error_message: str | None
     successful_items: int | None

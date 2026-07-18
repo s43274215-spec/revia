@@ -13,6 +13,15 @@ export type BackendProject = {
 
 export type GenerationStatus = "pending" | "parsing" | "matching" | "generating" | "validating" | "completed" | "partial_failed" | "failed";
 
+export type GenerationItemFailure = {
+  syllabus_item: string;
+  reason: string;
+  failure_type?: string | null;
+  position?: number | null;
+  syllabus_chapter?: string | null;
+  parent_syllabus_item?: string | null;
+};
+
 export type GenerationJob = {
   id: string;
   project_id: string;
@@ -21,7 +30,7 @@ export type GenerationJob = {
   progress: number;
   processed_items: number;
   total_items: number;
-  item_failures: { syllabus_item: string; reason: string }[];
+  item_failures: GenerationItemFailure[];
   status_history: GenerationStatus[];
   error_message: string | null;
   successful_items: number | null;

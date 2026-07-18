@@ -1,6 +1,8 @@
 import { Fragment, MouseEvent, ReactNode } from "react";
 import { BulletPoint, Project, Version, versionLabels } from "./data";
 import { classifyContentBlocks } from "./content-format";
+import { generationFailureCounts, successfulGenerationCount } from "@/lib/generation-failures";
+import type { GenerationJob } from "@/lib/revia-api";
 
 type ReadingContentProps = { project: Project; version: Version; query: string; onKeyword: (point: BulletPoint) => void; onPointContext: (event: MouseEvent, point: BulletPoint) => void };
 
@@ -27,12 +29,18 @@ export function renderContentBlocks(content: string[], query: string): ReactNode
   });
 }
 
-export function ReadingContent({ project, version, query, onKeyword, onPointContext }: ReadingContentProps) {
+export function ReadingContent({ project, version, query, onKeyword, onPointContext, partialJob }: ReadingContentProps & { partialJob: GenerationJob | null }) {
+  const failureCounts = partialJob ? generationFailureCounts(partialJob.item_failures) : null;
   return (
     <article className="reading-document" data-project={project.id}>
       <div className="document-kicker">{project.name} · 复习材料</div>
       <h1>{version === "keywords" ? "核心概念与记忆线索" : project.documentTitle}</h1>
       <p className="document-intro">{version === "keywords" ? "点击任一关键词，查看该要点对应的背诵内容。" : `当前为${versionLabels[version]}，按课程章节连续阅读全部内容。`}</p>
+      {partialJob && failureCounts && <aside className="partial-generation-summary" aria-label="部分生成结果">
+        <span>部分内容已生成</span>
+        <strong>{successfulGenerationCount(partialJob)} / {partialJob.total_items} 个考点可阅读</strong>
+        <p>{failureCounts.unmatched > 0 && `${failureCounts.unmatched} 个未找到资料依据`}{failureCounts.unmatched > 0 && failureCounts.schema_validation > 0 && " · "}{failureCounts.schema_validation > 0 && `${failureCounts.schema_validation} 个未通过格式检查`}{failureCounts.generation_error > 0 && ` · ${failureCounts.generation_error} 个生成未完成`}。详情已保留在左侧目录。</p>
+      </aside>}
       {project.chapters.map((chapter) => (
         <section className="chapter-section" id={chapter.id} key={chapter.id}>
           <div className="chapter-number">第 {chapter.number} 章</div>

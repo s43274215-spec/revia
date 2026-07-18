@@ -668,6 +668,9 @@ class GenerationPipelineAPITests(unittest.TestCase):
         self.assertEqual(payload["processed_items"], 3)
         self.assertEqual(payload["total_items"], 3)
         self.assertEqual(payload["item_failures"][0]["syllabus_item"], "Quantum mechanics")
+        self.assertEqual(payload["item_failures"][0]["failure_type"], "unmatched")
+        self.assertEqual(payload["item_failures"][0]["position"], 2)
+        self.assertEqual(payload["item_failures"][0]["syllabus_chapter"], "第三章 市场失灵")
         for state in ["pending", "parsing", "matching", "generating", "validating", "partial_failed"]:
             self.assertIn(state, payload["status_history"])
 

@@ -448,7 +448,7 @@ class GenerationWorkflowService:
         job: GenerationJob,
         project: Project,
         message: str,
-        failures: list[dict[str, str]] | None = None,
+        failures: list[dict[str, object]] | None = None,
     ) -> GenerationJob:
         self._mark_failed(job, project, message, failures)
         self._db.commit()
@@ -460,7 +460,7 @@ class GenerationWorkflowService:
         job: GenerationJob,
         project: Project,
         message: str,
-        failures: list[dict[str, str]] | None = None,
+        failures: list[dict[str, object]] | None = None,
     ) -> None:
         project.status = ProjectStatus.COMPLETED if project.chapters else ProjectStatus.FAILED
         job.item_failures = list(failures or job.item_failures or [])
@@ -535,9 +535,16 @@ class GenerationWorkflowService:
         item.completed_at = datetime.now(UTC)
 
     @staticmethod
-    def _item_failures(items: list[GenerationJobItem]) -> list[dict[str, str]]:
+    def _item_failures(items: list[GenerationJobItem]) -> list[dict[str, object]]:
         return [
-            {"syllabus_item": item.syllabus_item, "reason": item.error_message or item.failure_type or "failed"}
+            {
+                "syllabus_item": item.syllabus_item,
+                "reason": item.error_message or item.failure_type or "failed",
+                "failure_type": item.failure_type,
+                "position": item.position,
+                "syllabus_chapter": item.syllabus_chapter,
+                "parent_syllabus_item": item.parent_syllabus_item,
+            }
             for item in items
             if item.status == GenerationItemStatus.FAILED.value
         ]

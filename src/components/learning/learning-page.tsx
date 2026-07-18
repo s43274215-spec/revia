@@ -45,6 +45,7 @@ export function LearningPage({ projectId }: { projectId: string }) {
   const [generationError, setGenerationError] = useState<string | null>(null);
   const [generationStarting, setGenerationStarting] = useState(false);
   const [generationReconnecting, setGenerationReconnecting] = useState(false);
+  const [partialGenerationJob, setPartialGenerationJob] = useState<GenerationJob | null>(null);
   const [readingProgress, setReadingProgress] = useState(0);
   const readingRef = useRef<HTMLDivElement>(null);
   const generationStartGateRef = useRef(new SinglePromiseGate<GenerationJob>());
@@ -52,7 +53,12 @@ export function LearningPage({ projectId }: { projectId: string }) {
   const activeProject = history.present.find((project) => project.id === activeProjectId) ?? null;
 
   const loadProjects = useCallback(async () => {
-    const [project, material, projects] = await Promise.all([getBackendProject(projectId), getLearningMaterial(projectId), listProjects()]);
+    const [project, material, projects, latestJob] = await Promise.all([
+      getBackendProject(projectId),
+      getLearningMaterial(projectId),
+      listProjects(),
+      getLatestGenerationJob(projectId).catch(() => null),
+    ]);
     const current = toLearningProject(project, material);
     const sidebarProjects = projects
       .filter((item) => item.status === "completed")
@@ -60,6 +66,7 @@ export function LearningPage({ projectId }: { projectId: string }) {
     if (!sidebarProjects.some((item) => item.id === projectId)) sidebarProjects.unshift(current);
     setHistory({ past: [], present: sidebarProjects, future: [] });
     setActiveProjectId(projectId);
+    setPartialGenerationJob(latestJob?.status === "partial_failed" ? latestJob : null);
   }, [projectId]);
 
   useEffect(() => {
@@ -190,14 +197,14 @@ export function LearningPage({ projectId }: { projectId: string }) {
     <main className="learning-shell" onClick={() => setMenu(null)}>
       <ProjectSidebar projects={history.present} activeProjectId={activeProjectId} onSelect={selectProject} />
       {loading ? <section className="project-empty"><div><span>复习项目</span><h1>正在读取学习材料</h1><p>正在从 Revia 后端加载当前项目。</p></div></section> : loadError ? <section className="project-empty"><div><span>复习项目</span><h1>无法读取学习材料</h1><p>{loadError}</p></div></section> : !activeProject ? <section className="project-empty"><div><span>复习项目</span><h1>选择一个项目继续阅读</h1><p>从左侧项目列表进入对应的课程复习材料。</p></div></section> : activeProject.chapters.length === 0 ? <section className="project-empty"><div><span>复习项目</span><h1>暂无生成内容</h1><p>当前项目还没有可供阅读的学习材料。</p></div></section> : <>
-        <OutlineSidebar project={activeProject} progress={readingProgress} onNavigate={navigate} />
+        <OutlineSidebar project={activeProject} progress={readingProgress} onNavigate={navigate} partialJob={partialGenerationJob} />
         <section className="workspace">
           <Toolbar query={query} onQueryChange={setQuery} onExport={() => setExportOpen((value) => !value)} onRegenerate={regenerate} regenerating={Boolean(generationJob) || generationStarting || generationReconnecting} onUndo={undo} onRedo={redo} canUndo={history.past.length > 0} canRedo={history.future.length > 0} />
           {exportOpen && <div className="export-menu"><span>导出</span><button onClick={() => setExportOpen(false)}>Word</button></div>}
           <div className="version-bar" role="tablist" aria-label="内容版本">
             {tabs.map((tab) => <button role="tab" aria-selected={version === tab.id} className={version === tab.id ? "is-active" : ""} key={tab.id} onClick={() => { setVersion(tab.id); setDrawer(null); }}>{tab.label}</button>)}
           </div>
-          <div className="reading-scroll" ref={readingRef} onScroll={(event: UIEvent<HTMLDivElement>) => calculateProgress(event.currentTarget)}><ReadingContent project={activeProject} version={version} query={query} onKeyword={(point) => { if (version === "keywords") setDrawer({ mode: "keyword", point }); }} onPointContext={openContext} /></div>
+          <div className="reading-scroll" ref={readingRef} onScroll={(event: UIEvent<HTMLDivElement>) => calculateProgress(event.currentTarget)}><ReadingContent project={activeProject} version={version} query={query} partialJob={partialGenerationJob} onKeyword={(point) => { if (version === "keywords") setDrawer({ mode: "keyword", point }); }} onPointContext={openContext} /></div>
           {drawer && <OperationDrawer key={`${drawer.mode}-${drawer.point.id}-${drawer.mode === "keyword" ? "recitation" : drawer.version}`} state={drawer} onClose={() => setDrawer(null)} onSaveSingle={saveSingle} onSaveGlobal={saveGlobal} />}
         </section>
       </>}
