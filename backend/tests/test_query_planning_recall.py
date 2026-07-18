@@ -4,6 +4,7 @@ import uuid
 
 from app.ai.clients.base import AIClient
 from app.ai.service import AIService
+from app.matching.aliases import alias_queries, configured_subqueries
 from app.matching.query_planning import QueryPlanner, SyllabusItemType
 from app.matching.service import MatchingService
 from app.models.document import TextChunk
@@ -14,14 +15,21 @@ from app.syllabus.parser import ParsedSyllabusItem
 DOCUMENT_ID = uuid.uuid4()
 
 
-def chunk(position: int, text: str, *, page: int | None = None, section: str | None = None) -> TextChunk:
+def chunk(
+    position: int,
+    text: str,
+    *,
+    page: int | None = None,
+    section: str | None = None,
+    chapter: str = "人力资源管理",
+) -> TextChunk:
     return TextChunk(
         id=uuid.uuid4(),
         parsed_document_id=DOCUMENT_ID,
         position=position,
         page_start=page or position + 1,
         page_end=page or position + 1,
-        chapter_title="人力资源管理",
+        chapter_title=chapter,
         section_title=section,
         content=text,
     )
@@ -121,14 +129,67 @@ class QueryPlanningRecallTests(unittest.TestCase):
         plan = QueryPlanner().plan_item("需掌握内部供给、外部供给的计算逻辑，总供给的计算方法是核心考点。")
         self.assertEqual(plan.item_type, SyllabusItemType.COMPOSITE)
 
+    def test_network_comparison_splits_without_domain_configuration(self) -> None:
+        title = "TCP与UDP的区别"
+        self.assertEqual(alias_queries(title), ())
+        self.assertEqual(configured_subqueries(title), ())
+        plan = QueryPlanner().plan_item(title, chapter="计算机网络")
+        self.assertEqual(plan.item_type, SyllabusItemType.COMPOSITE)
+        self.assertEqual(plan.subqueries, ("TCP", "UDP"))
+        sources = [
+            chunk(0, "TCP提供面向连接、可靠且有序的字节流传输。", page=41, chapter="计算机网络"),
+            chunk(1, "UDP提供无连接的数据报传输，不保证可靠交付。", page=42, chapter="计算机网络"),
+        ]
+        match = self.matcher.match_plan(plan=plan, chunks=sources)
+        self.assertTrue(match.matched)
+        self.assertEqual({candidate.chunk_id for candidate in match.candidates}, {item.id for item in sources})
+
+    def test_network_collection_parent_reuses_protocol_children(self) -> None:
+        entries = [
+            ParsedSyllabusItem("计算机网络", "主要传输层协议"),
+            ParsedSyllabusItem("计算机网络", "TCP协议", "主要传输层协议"),
+            ParsedSyllabusItem("计算机网络", "UDP协议", "主要传输层协议"),
+        ]
+        sources = [
+            chunk(0, "TCP协议通过确认与重传实现可靠传输。", chapter="计算机网络"),
+            chunk(1, "UDP协议首部开销较小，适用于实时传输。", chapter="计算机网络"),
+        ]
+        plans = self.matcher.plan_items(entries)
+        self.assertEqual(plans[0].item_type, SyllabusItemType.COLLECTION)
+        matches = [self.matcher.match_plan(plan=plan, chunks=sources) for plan in plans]
+        resolved = self.matcher.resolve_dependent_matches(plans, matches)
+        self.assertTrue(resolved[0].matched)
+        self.assertEqual({candidate.chunk_id for candidate in resolved[0].candidates}, {item.id for item in sources})
+
+    def test_fiscal_policy_shared_suffix_is_restored_generically(self) -> None:
+        title = "扩张性、紧缩性财政政策"
+        self.assertEqual(alias_queries(title), ())
+        self.assertEqual(configured_subqueries(title), ())
+        plan = QueryPlanner().plan_item(title, chapter="宏观经济学")
+        self.assertEqual(plan.item_type, SyllabusItemType.COMPOSITE)
+        self.assertEqual(plan.subqueries, ("扩张性财政政策", "紧缩性财政政策"))
+        sources = [
+            chunk(0, "扩张性财政政策可以增加政府支出或减少税收。", page=88, chapter="宏观经济学"),
+            chunk(1, "紧缩性财政政策可以减少政府支出或增加税收。", page=89, chapter="宏观经济学"),
+        ]
+        match = self.matcher.match_plan(plan=plan, chunks=sources)
+        covered = {
+            query
+            for candidate in match.candidates
+            for query in candidate.matched_queries
+            if query in plan.subqueries
+        }
+        self.assertEqual(covered, set(plan.subqueries))
+
 
 class CountingRewriteClient(AIClient):
-    def __init__(self) -> None:
+    def __init__(self, queries: list[str] | None = None) -> None:
         self.calls = 0
+        self.queries = queries or ["教材中的抽象概念"]
 
     async def generate_completion(self, *, system_prompt: str, user_prompt: str) -> str:
         self.calls += 1
-        return json.dumps({"queries": ["教材中的抽象概念"]}, ensure_ascii=False)
+        return json.dumps({"queries": self.queries}, ensure_ascii=False)
 
 
 class QueryRewriteFallbackTests(unittest.IsolatedAsyncioTestCase):
@@ -148,6 +209,33 @@ class QueryRewriteFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.calls, 1)
         self.assertTrue(all(plan.used_ai_fallback for plan in rewritten_plans))
         self.assertTrue(all(match.used_ai_fallback for match in rewritten_matches))
+
+    async def test_ai_rewrite_recalls_an_unconfigured_economics_term(self) -> None:
+        matcher = MatchingService(threshold=0.35, fallback_threshold=0.28, max_candidates=6)
+        plan = QueryPlanner().plan_item("财政政策自动稳定机制", chapter="宏观经济学")
+        source = chunk(
+            0,
+            "内在稳定器会随经济周期自动改变税收和转移支付，从而缓冲总需求波动。",
+            page=92,
+            chapter="宏观经济学",
+        )
+        deterministic_match = matcher.match_plan(plan=plan, chunks=[source])
+        self.assertFalse(deterministic_match.matched)
+        client = CountingRewriteClient(["内在稳定器"])
+        workflow = GenerationWorkflowService(
+            db=None,
+            workspace_id=uuid.uuid4(),
+            ai_service=AIService(client),
+            matching_service=matcher,
+            provider_name="test",
+        )
+        rewritten_plans, rewritten_matches = await workflow._apply_query_rewrite_fallbacks(
+            [plan], [deterministic_match], [source]
+        )
+        self.assertEqual(client.calls, 1)
+        self.assertTrue(rewritten_plans[0].used_ai_fallback)
+        self.assertTrue(rewritten_matches[0].matched)
+        self.assertEqual(rewritten_matches[0].candidates[0].chunk_id, source.id)
 
 
 if __name__ == "__main__":

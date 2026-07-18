@@ -52,6 +52,8 @@ _INSTRUCTION_FRAGMENTS = re.compile(
     r"|^二者的?(?:核心)?区别|^各自的?(?:范畴|内容|内涵)"
 )
 _SPLIT_CONNECTORS = re.compile(r"[、,，;；/]|(?<=[\u4e00-\u9fffA-Za-z0-9])(?:以及|及|与|和)(?=[\u4e00-\u9fffA-Za-z0-9])")
+_COMPARISON_SUFFIX = re.compile(r"(?:的)?(?:联系与区别|区别与联系|区别|差异|异同|比较)$")
+_SHARED_SUFFIX_BOUNDARIES = frozenset("性型式类期侧方部")
 
 
 class QueryPlanner:
@@ -133,13 +135,34 @@ class QueryPlanner:
 
     @staticmethod
     def _split_subqueries(value: str) -> tuple[str, ...]:
+        value = _COMPARISON_SUFFIX.sub("", value).strip()
         parts: list[str] = []
         for raw in _SPLIT_CONNECTORS.split(value):
             cleaned = raw.strip(" .。:：()（）")
             cleaned = _INSTRUCTION_FRAGMENTS.sub("", cleaned).strip(" .。:：()（）")
             if len(normalize_query_key(cleaned)) >= 2:
                 parts.append(cleaned)
+        parts = QueryPlanner._restore_shared_suffix(parts)
         return _unique(tuple(parts)) if len(parts) >= 2 else ()
+
+    @staticmethod
+    def _restore_shared_suffix(parts: list[str]) -> list[str]:
+        if len(parts) < 2 or len(parts[-1]) < 4:
+            return parts
+        short_parts = parts[:-1]
+        boundary = short_parts[0][-1] if short_parts and short_parts[0] else ""
+        if (
+            boundary not in _SHARED_SUFFIX_BOUNDARIES
+            or any(len(part) > 6 or not part.endswith(boundary) for part in short_parts)
+        ):
+            return parts
+        boundary_index = parts[-1].find(boundary)
+        if boundary_index < 1:
+            return parts
+        shared_suffix = parts[-1][boundary_index + 1 :]
+        if len(normalize_query_key(shared_suffix)) < 2:
+            return parts
+        return [f"{part}{shared_suffix}" for part in short_parts] + [parts[-1]]
 
     @staticmethod
     def _related_titles(entries: list[ParsedSyllabusItem], index: int) -> tuple[str, ...]:
