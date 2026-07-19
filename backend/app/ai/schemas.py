@@ -6,9 +6,19 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.models.enums import ContentVersionKind
 
 TITLE_MAX_LENGTH = 25
-ORIGINAL_MAX_LENGTH = 800
-RECITATION_MAX_LENGTH = 400
-KEYWORDS_MAX_LENGTH = 160
+
+# Product guidance remains intentionally concise, but these are recommendations,
+# not reasons to discard otherwise valid learning material.
+ORIGINAL_RECOMMENDED_LENGTH = 800
+RECITATION_RECOMMENDED_LENGTH = 400
+KEYWORDS_RECOMMENDED_MIN_ITEMS = 3
+KEYWORDS_RECOMMENDED_MAX_ITEMS = 8
+
+# Hard limits exist only as runaway-output safety rails.
+ORIGINAL_MAX_LENGTH = 8000
+RECITATION_MAX_LENGTH = 5000
+KEYWORDS_MAX_LENGTH = 2000
+KEYWORDS_MAX_ITEMS = 50
 
 _HEADING_NUMBER_PATTERN = re.compile(
     r"第[一二三四五六七八九十百\d]+[章节篇]|(?:^|\s)[一二三四五六七八九十百]+[、.]|[（(][一二三四五六七八九十百\d]+[）)]"
@@ -137,6 +147,31 @@ class GeneratedBulletPayload(BaseModel):
     def title_is_readable_and_concise(cls, value: str) -> str:
         return _validate_generated_title(value)
 
+    @field_validator("keywords", mode="before")
+    @classmethod
+    def normalize_keyword_items(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        content = value.get("content")
+        if not isinstance(content, str):
+            return value
+        items = [
+            item.strip()
+            for item in re.split(r"[\n、，,；;|/]+", content)
+            if item.strip()
+        ]
+        unique: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            normalized = _normalize_title(item)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            unique.append(item)
+        normalized_value = dict(value)
+        normalized_value["content"] = "、".join(unique)
+        return normalized_value
+
     @model_validator(mode="after")
     def sources_are_unique_and_positive(self) -> "GeneratedBulletPayload":
         if len(self.source_chunk_ids) != len(set(self.source_chunk_ids)):
@@ -155,11 +190,10 @@ class GeneratedBulletPayload(BaseModel):
             for item in re.split(r"[\n、，,；;]+", self.keywords.content)
             if item.strip()
         ]
-        if not 3 <= len(keyword_items) <= 8:
-            raise ValueError("keywords content must contain between 3 and 8 keywords or phrases")
-        normalized_keywords = [_normalize_title(item) for item in keyword_items]
-        if len(normalized_keywords) != len(set(normalized_keywords)):
-            raise ValueError("keywords content must not contain duplicate keywords or phrases")
+        if len(keyword_items) > KEYWORDS_MAX_ITEMS:
+            raise ValueError(
+                f"keywords content must not exceed the safety limit of {KEYWORDS_MAX_ITEMS} keywords or phrases"
+            )
         if self.original.content.strip() == self.recitation.content.strip():
             raise ValueError("recitation content must not duplicate original content verbatim")
         return self

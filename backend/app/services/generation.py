@@ -1,6 +1,7 @@
 import asyncio
 import uuid
 from collections import OrderedDict
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -123,17 +124,29 @@ class GenerationWorkflowService:
 
         syllabus_text = project.syllabus.text if project.syllabus and project.syllabus.text else ""
         syllabus_items = self._syllabus_parser.flatten_hierarchy(syllabus_text)
+        retry_items = self._retryable_partial_items(existing, syllabus_items) if regenerate else None
         now = datetime.now(UTC)
+        reusable_success_count = sum(
+            item.status == GenerationItemStatus.SUCCEEDED.value
+            and item.result_payload is not None
+            and item.candidates_payload is not None
+            for item in (retry_items or [])
+        )
+        progress = (
+            min(95, 20 + int(75 * reusable_success_count / max(len(syllabus_items), 1)))
+            if reusable_success_count
+            else 0
+        )
         job = GenerationJob(
             project_id=project.id,
             status=GenerationStatus.PENDING,
             provider=self._provider_name,
-            progress=0,
-            processed_items=0,
+            progress=progress,
+            processed_items=reusable_success_count,
             total_items=len(syllabus_items),
             item_failures=[],
             status_history=[GenerationStatus.PENDING.value],
-            successful_items=0,
+            successful_items=reusable_success_count,
             failed_items=0,
             started_at=now,
             last_activity_at=now,
@@ -141,17 +154,36 @@ class GenerationWorkflowService:
         project.status = ProjectStatus.PROCESSING
         self._db.add(job)
         self._db.flush()
-        self._db.add_all([
-            GenerationJobItem(
+        checkpoints: list[GenerationJobItem] = []
+        for index, entry in enumerate(syllabus_items):
+            previous = retry_items[index] if retry_items is not None else None
+            reusable = bool(
+                previous is not None
+                and previous.status == GenerationItemStatus.SUCCEEDED.value
+                and previous.result_payload is not None
+                and previous.candidates_payload is not None
+            )
+            checkpoints.append(GenerationJobItem(
                 job_id=job.id,
                 position=index,
                 syllabus_chapter=entry.chapter,
                 syllabus_item=entry.title,
                 parent_syllabus_item=entry.parent_title,
-                status=GenerationItemStatus.PENDING.value,
-            )
-            for index, entry in enumerate(syllabus_items)
-        ])
+                status=(
+                    GenerationItemStatus.SUCCEEDED.value
+                    if reusable
+                    else GenerationItemStatus.PENDING.value
+                ),
+                result_payload=deepcopy(previous.result_payload) if reusable else None,
+                candidates_payload=(
+                    deepcopy(previous.candidates_payload)
+                    if previous is not None and previous.candidates_payload is not None
+                    else None
+                ),
+                started_at=now if reusable else None,
+                completed_at=now if reusable else None,
+            ))
+        self._db.add_all(checkpoints)
         self._db.commit()
         self._db.refresh(job)
         return PreparedGeneration(job=job, should_process=True)
@@ -436,6 +468,26 @@ class GenerationWorkflowService:
             .order_by(GenerationJob.started_at.desc(), GenerationJob.created_at.desc())
             .with_for_update()
         ).all())
+
+    def _retryable_partial_items(
+        self,
+        job: GenerationJob | None,
+        syllabus_items: list,
+    ) -> list[GenerationJobItem] | None:
+        if job is None or job.status != GenerationStatus.PARTIAL_FAILED:
+            return None
+        items = self._job_items(job.id)
+        if len(items) != len(syllabus_items):
+            return None
+        for index, (item, entry) in enumerate(zip(items, syllabus_items, strict=True)):
+            if (
+                item.position != index
+                or item.syllabus_item != entry.title
+                or item.syllabus_chapter != entry.chapter
+                or item.parent_syllabus_item != entry.parent_title
+            ):
+                return None
+        return items
 
     def _latest_reusable_job(self, project_id: uuid.UUID) -> GenerationJob | None:
         return self._db.scalar(

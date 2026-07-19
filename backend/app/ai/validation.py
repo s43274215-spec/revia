@@ -5,7 +5,14 @@ from copy import deepcopy
 
 from pydantic import ValidationError
 
-from app.ai.schemas import GeneratedItemResult, GeneratedProject
+from app.ai.schemas import (
+    GeneratedItemResult,
+    GeneratedProject,
+    KEYWORDS_RECOMMENDED_MAX_ITEMS,
+    KEYWORDS_RECOMMENDED_MIN_ITEMS,
+    ORIGINAL_RECOMMENDED_LENGTH,
+    RECITATION_RECOMMENDED_LENGTH,
+)
 
 logger = logging.getLogger("revia.ai.validation")
 
@@ -158,10 +165,42 @@ def normalize_generated_item_payload(payload: object, *, fallback_title: str | N
     return normalized
 
 
+def _log_soft_format_warnings(result: GeneratedItemResult) -> None:
+    for bullet_index, bullet in enumerate(result.bullet_points):
+        keyword_count = len([
+            item
+            for item in re.split(r"[\n、，,；;]+", bullet.keywords.content)
+            if item.strip()
+        ])
+        warnings: list[str] = []
+        if len(bullet.original.content) > ORIGINAL_RECOMMENDED_LENGTH:
+            warnings.append(
+                f"original length {len(bullet.original.content)} exceeds recommended {ORIGINAL_RECOMMENDED_LENGTH}"
+            )
+        if len(bullet.recitation.content) > RECITATION_RECOMMENDED_LENGTH:
+            warnings.append(
+                f"recitation length {len(bullet.recitation.content)} exceeds recommended {RECITATION_RECOMMENDED_LENGTH}"
+            )
+        if not KEYWORDS_RECOMMENDED_MIN_ITEMS <= keyword_count <= KEYWORDS_RECOMMENDED_MAX_ITEMS:
+            warnings.append(
+                f"keyword count {keyword_count} is outside recommended "
+                f"{KEYWORDS_RECOMMENDED_MIN_ITEMS}-{KEYWORDS_RECOMMENDED_MAX_ITEMS}"
+            )
+        if warnings:
+            logger.warning(
+                "AI item accepted with soft format warning bullet=%d title=%s: %s",
+                bullet_index,
+                bullet.title,
+                "; ".join(warnings),
+            )
+
+
 def validate_generated_item(raw_output: str, *, fallback_title: str | None = None) -> GeneratedItemResult:
     try:
         payload = normalize_generated_item_payload(extract_json(raw_output), fallback_title=fallback_title)
-        return GeneratedItemResult.model_validate(payload)
+        result = GeneratedItemResult.model_validate(payload)
+        _log_soft_format_warnings(result)
+        return result
     except ValidationError as exc:
         details = "; ".join(
             f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
