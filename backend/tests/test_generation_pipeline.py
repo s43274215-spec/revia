@@ -1,5 +1,7 @@
+import asyncio
 import json
 import tempfile
+import time
 import unittest
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -21,6 +23,7 @@ from app.core.config import Settings, get_settings
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
+from app.api.v1.endpoints.generation import GenerationTaskRunner
 from app.matching.schemas import CandidateChunk
 from app.matching.service import MatchingService
 from app.models.content import BulletPoint, BulletPointSource, Chapter, ContentVersion, KnowledgePoint
@@ -44,6 +47,22 @@ class SequenceClient(AIClient):
         self.prompts.append(user_prompt)
         return self.outputs.pop(0)
 
+
+
+
+class GenerationTaskRunnerIsolationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_generation_worker_does_not_block_the_web_event_loop(self) -> None:
+        runner = GenerationTaskRunner(lambda: None, Settings(ai_mode="mock"), object())
+
+        def block(*_args) -> None:
+            time.sleep(0.12)
+
+        with patch.object(runner, "_run_blocking", side_effect=block):
+            task = asyncio.create_task(runner.run(uuid.uuid4(), uuid.uuid4(), uuid.uuid4()))
+            started = time.perf_counter()
+            await asyncio.sleep(0.02)
+            self.assertLess(time.perf_counter() - started, 0.08)
+            await task
 
 class SyllabusAndMatchingTests(unittest.TestCase):
     def test_syllabus_parser_supports_chapters_numbering_plain_lines_and_deduplication(self) -> None:
