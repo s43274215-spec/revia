@@ -35,8 +35,8 @@ class WordExportTests(unittest.TestCase):
             knowledge = KnowledgePoint(title="财政政策工具", position=0)
             bullet = BulletPoint(position=0)
             bullet.versions = [
-                ContentVersion(kind=ContentVersionKind.ORIGINAL, title="政策作用机制", content="详细正文。\n\n1. 政府支出\n2. 税收"),
-                ContentVersion(kind=ContentVersionKind.RECITATION, title="政策作用机制", content="标准版考试表达。"),
+                ContentVersion(kind=ContentVersionKind.ORIGINAL, title="政策作用机制", content="原文版本正文。\n\n1. 政府支出\n2. 税收"),
+                ContentVersion(kind=ContentVersionKind.RECITATION, title="政策作用机制", content="背诵版本考试表达。"),
                 ContentVersion(kind=ContentVersionKind.KEYWORDS, title="政策作用机制", content="- 支出\n- 税收"),
             ]
             bullet.sources = [BulletPointSource(
@@ -82,9 +82,9 @@ class WordExportTests(unittest.TestCase):
         self.assertIn("资料章节：财政政策", text)
         self.assertIn("财政政策工具", text)
         self.assertIn("政策作用机制", text)
-        self.assertIn("详细正文", text)
-        self.assertNotIn("标准版考试表达", text)
-        self.assertNotIn("简洁版", text)
+        self.assertIn("原文版本正文", text)
+        self.assertNotIn("背诵版本考试表达", text)
+        self.assertNotIn("关键词版本", text)
         self.assertIn("来源：第 12、13 页", text)
         self.assertIn("未生成条目附录", text)
         self.assertIn("自动稳定器", text)
@@ -92,7 +92,7 @@ class WordExportTests(unittest.TestCase):
         self.assertTrue(any(paragraph.style.name == "List Number" for paragraph in document.paragraphs))
         self.assertNotIn("/", filename)
         self.assertNotIn("：", filename)
-        self.assertTrue(filename.endswith("-详细版-2026-07-19.docx"))
+        self.assertTrue(filename.endswith("-原文版本-2026-07-19.docx"))
 
     def test_all_versions_contains_three_labels_and_valid_docx_parts(self) -> None:
         with self.Session() as db:
@@ -101,9 +101,11 @@ class WordExportTests(unittest.TestCase):
             self.assertIn("[Content_Types].xml", archive.namelist())
             self.assertIn("word/document.xml", archive.namelist())
         _, text = self._text(payload)
-        for label in ("简洁版", "标准版", "详细版"):
+        for label in ("原文版本", "背诵版本", "关键词版本"):
             self.assertIn(label, text)
-        self.assertIn("标准版考试表达", text)
+        self.assertLess(text.index("原文版本"), text.index("背诵版本"))
+        self.assertLess(text.index("背诵版本"), text.index("关键词版本"))
+        self.assertIn("背诵版本考试表达", text)
         self.assertIn("全部版本", filename)
 
     def test_export_is_workspace_scoped(self) -> None:

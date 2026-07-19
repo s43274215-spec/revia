@@ -32,14 +32,14 @@ def material_payload(project_id: str):
             bullet_id = f"{chapter_index + 3}{point_index + 3}000000-0000-0000-0000-000000000001"
             title = f"内部小标题 {chapter_index + 1}-{point_index + 1}"
             detailed = "\n\n".join([
-                f"详细版正文用于长内容阅读与搜索定位。章节 {chapter_index + 1}，知识点 {point_index + 1}。",
+                f"原文版本正文用于长内容阅读与搜索定位。章节 {chapter_index + 1}，知识点 {point_index + 1}。",
                 "1. 第一项完整说明\n2. 第二项完整说明\n3. 第三项完整说明",
                 "补充段落。" * 24,
             ])
             versions = [
                 {"id": bullet_id[:-1] + "2", "kind": "original", "title": title, "content": detailed},
-                {"id": bullet_id[:-1] + "3", "kind": "recitation", "title": title, "content": "标准版正文适合考试表达。\n\n- 定义\n- 机制\n- 结论"},
-                {"id": bullet_id[:-1] + "4", "kind": "keywords", "title": title, "content": "简洁关键词、记忆线索、中文检索"},
+                {"id": bullet_id[:-1] + "3", "kind": "recitation", "title": title, "content": "背诵版本正文适合考试表达。\n\n- 定义\n- 机制\n- 结论"},
+                {"id": bullet_id[:-1] + "4", "kind": "keywords", "title": title, "content": "关键词版本、记忆线索、中文检索"},
             ]
             points.append({
                 "id": bullet_id[:-1] + "5",
@@ -60,7 +60,7 @@ def docx_bytes() -> bytes:
     document = Document()
     document.add_heading("独立演示项目", 0)
     document.add_heading("资料第一章 市场结构", 1)
-    document.add_paragraph("标准版正文适合考试表达。")
+    document.add_paragraph("背诵版本正文适合考试表达。")
     output = io.BytesIO()
     document.save(output)
     return output.getvalue()
@@ -92,7 +92,7 @@ def install_api(context):
             project_id = path.split("/")[2]
             route.fulfill(json=material_payload(project_id))
         elif path.endswith("/exports/word"):
-            filename = "独立演示项目-标准版-2026-07-19.docx"
+            filename = "独立演示项目-背诵版本-2026-07-19.docx"
             route.fulfill(
                 body=exported,
                 headers={
@@ -159,8 +159,8 @@ with sync_playwright() as playwright:
     demo.get_by_role("button", name="清空").click()
     assert demo.locator("mark").count() == 0
 
-    demo.get_by_role("tab", name="标准版").click()
-    search.fill("标准版正文")
+    demo.get_by_role("tab", name="背诵版本").click()
+    search.fill("背诵版本正文")
     demo.get_by_text("9 个结果", exact=True).wait_for()
     demo.get_by_role("button", name="清空").click()
 
@@ -187,7 +187,7 @@ with sync_playwright() as playwright:
     triggers.nth(2).click()
     assert drawer.locator('.accordion-trigger[aria-expanded="true"]').count() == 3
 
-    middle_editor = drawer.get_by_label("标准版内容")
+    middle_editor = drawer.get_by_label("背诵版本内容")
     middle_editor.fill("\n\n".join([f"长编辑内容 {index}" for index in range(120)]))
     drawer_body = drawer.locator(".drawer-body")
     middle_editor.evaluate("element => { element.scrollTop = element.scrollHeight }")

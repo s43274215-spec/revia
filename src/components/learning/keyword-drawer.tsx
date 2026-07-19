@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { BulletPoint, PointVersions, Version, VersionPoint, versionLabels } from "./data";
+import { BulletPoint, PointVersions, Version, VersionPoint, versionContract, versionLabels } from "./data";
 import { Icon } from "./icons";
 import { toggleExpandedVersions } from "./drawer-state";
 
@@ -54,7 +54,7 @@ export function OperationDrawer({ state, demoMode = false, onClose, onSaveSingle
           {state.mode === "global" && <>
             <p className="drawer-context">同一要点的三个版本</p><div className="drawer-rule" />
             <div className="accordion">
-              {(["original", "recitation", "keywords"] as Version[]).map((version) => (
+              {versionContract.map(({ id: version }) => (
                 <section className={expanded.has(version) ? "is-expanded" : ""} key={version}>
                   <button className="accordion-trigger" onClick={() => toggleExpanded(version)} aria-expanded={expanded.has(version)}><span>{versionLabels[version]}</span><i>⌄</i></button>
                   {expanded.has(version) && <div className="accordion-fields">

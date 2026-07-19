@@ -1,5 +1,15 @@
 export type Version = "original" | "recitation" | "keywords";
 
+export const versionContract = [
+  { id: "original", label: "原文版本" },
+  { id: "recitation", label: "背诵版本" },
+  { id: "keywords", label: "关键词版本" },
+] as const satisfies readonly { id: Version; label: string }[];
+
+export const versionLabels = Object.fromEntries(
+  versionContract.map(({ id, label }) => [id, label]),
+) as Record<Version, string>;
+
 export type VersionPoint = { title: string; content: string[] };
 
 export type PointVersions = Record<Version, VersionPoint>;
@@ -123,5 +133,3 @@ export const initialProjects: Project[] = rawProjects.map((project) => ({
     })),
   })),
 }));
-
-export const versionLabels: Record<Version, string> = { original: "详细版", recitation: "标准版", keywords: "简洁版" };
