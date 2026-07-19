@@ -33,7 +33,7 @@ export function SearchResults({
           {results.map((result, index) => (
             <li key={result.id}>
               <button className={activeIndex === index ? "is-active" : ""} type="button" onClick={() => onSelect(index)}>
-                <span>{result.kind} · {result.chapter}</span>
+                <span>{result.kind}{result.chapter ? ` · ${result.chapter}` : ""}</span>
                 <strong>{result.knowledgePoint || result.chapter}</strong>
                 <p>{result.context}</p>
               </button>

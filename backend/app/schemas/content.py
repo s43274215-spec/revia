@@ -61,8 +61,9 @@ class ChapterRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
-    title: str
+    title: str | None
     position: int
+    chapter_resolved: bool
     knowledge_points: list[KnowledgePointRead]
 
 

@@ -54,6 +54,17 @@ test("empty and unmatched searches return no results", () => {
   assert.deepEqual(searchProject(project, "original", "不存在", classifyContentBlocks), []);
 });
 
+test("an unresolved chapter contributes no chapter search record while its knowledge remains searchable", () => {
+  const unresolved = {
+    ...project,
+    chapters: [{ ...project.chapters[0], number: null, title: null }],
+  };
+  assert.equal(searchProject(unresolved, "original", "市场失灵", classifyContentBlocks).length, 0);
+  const knowledge = searchProject(unresolved, "original", "外部性", classifyContentBlocks);
+  assert.equal(knowledge.length, 1);
+  assert.equal(knowledge[0].chapter, "");
+});
+
 test("global editor accordions can all close, all open, or leave only the middle open", () => {
   let expanded = new Set(["original", "recitation", "keywords"]);
   expanded = toggleExpandedVersions(expanded, "original");

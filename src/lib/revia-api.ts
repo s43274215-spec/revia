@@ -44,7 +44,7 @@ export type GenerationJob = {
 export type BackendContentVersion = { id: string; kind: "original" | "recitation" | "keywords"; title: string; content: string };
 export type BackendBulletPoint = { id: string; position: number; versions: BackendContentVersion[]; sources: { text_chunk_id: string; page_start: number; page_end: number }[] };
 export type BackendKnowledgePoint = { id: string; title: string; position: number; bullet_points: BackendBulletPoint[] };
-export type BackendChapter = { id: string; title: string; position: number; knowledge_points: BackendKnowledgePoint[] };
+export type BackendChapter = { id: string; title: string | null; position: number; chapter_resolved?: boolean; knowledge_points: BackendKnowledgePoint[] };
 export type LearningMaterialResponse = { project_id: string; chapters: BackendChapter[] };
 
 export type DocumentProcessingStatus = "uploaded" | "queued" | "processing" | "parsing" | "interrupted" | "cancelled" | "parsed" | "failed";

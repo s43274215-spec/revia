@@ -27,8 +27,8 @@ export type KnowledgePoint = {
 
 export type Chapter = {
   id: string;
-  number: string;
-  title: string;
+  number: string | null;
+  title: string | null;
   points: KnowledgePoint[];
 };
 

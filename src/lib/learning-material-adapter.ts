@@ -24,8 +24,8 @@ export function toLearningProject(project: BackendProject, material: LearningMat
     documentTitle: `${project.name}复习材料`,
     chapters: material.chapters.map((chapter, chapterIndex) => ({
       id: chapter.id,
-      number: String(chapter.position + 1 || chapterIndex + 1).padStart(2, "0"),
-      title: chapter.title,
+      number: chapter.title && chapter.chapter_resolved !== false ? String(chapter.position + 1 || chapterIndex + 1).padStart(2, "0") : null,
+      title: chapter.chapter_resolved === false ? null : chapter.title,
       points: chapter.knowledge_points.map((knowledgePoint) => ({
         id: knowledgePoint.id,
         title: knowledgePoint.title,

@@ -48,7 +48,7 @@ export function OutlineSidebar({ project, progress, activeId, onNavigate, partia
       <nav className="outline-nav">
         {project.chapters.map((chapter: Chapter) => (
           <div className="outline-chapter" key={chapter.id}>
-            <button ref={itemRef(chapter.id)} className={activeId === chapter.id ? "is-active" : ""} aria-current={activeId === chapter.id ? "location" : undefined} onClick={() => onNavigate(chapter.id)}><span>{chapter.number}</span>{chapter.title}</button>
+            {chapter.title && <button ref={itemRef(chapter.id)} className={activeId === chapter.id ? "is-active" : ""} aria-current={activeId === chapter.id ? "location" : undefined} onClick={() => onNavigate(chapter.id)}><span>{chapter.number}</span>{chapter.title}</button>}
             <div className="outline-points">
               {chapter.points.map((point) => <button ref={itemRef(point.id)} className={activeId === point.id ? "is-active" : ""} aria-current={activeId === point.id ? "location" : undefined} key={point.id} onClick={() => onNavigate(point.id)}>{point.title}</button>)}
             </div>

@@ -19,6 +19,8 @@ from sqlalchemy.orm import Session, selectinload
 from app.models.content import BulletPoint, Chapter, KnowledgePoint
 from app.models.enums import ContentVersionKind
 from app.models.project import GenerationJob, Project
+from app.schemas.content import BulletPointRead, KnowledgePointRead
+from app.services.content_organization import canonical_learning_material, is_displayable_source_chapter
 
 
 VERSION_CONTRACT = (
@@ -32,8 +34,6 @@ _UNSAFE_FILENAME = re.compile(r'[<>:"/\\|?*：／＼\x00-\x1f]+')
 _ORDERED_ITEM = re.compile(r"^\s*(?:\d+[.、)）]|[（(][一二三四五六七八九十百\d]+[）)])\s*(.+)$")
 _BULLET_ITEM = re.compile(r"^\s*[-–—•·]\s*(.+)$")
 _SECRET = re.compile(r"(?i)(?:sk-[A-Za-z0-9_-]{8,}|(?:password|secret|token|api[_ -]?key)\s*[:=]\s*\S+)")
-_PAGE_BASED_CHAPTER = re.compile(r"(?:^|[·•|｜])\s*第\s*\d+\s*(?:[–—-]\s*\d+\s*)?页\s*$")
-_UNRELIABLE_CHAPTER_TITLES = {"未分章", "未归类内容"}
 
 
 @dataclass(frozen=True)
@@ -101,6 +101,10 @@ class WordExportService:
                 .selectinload(Chapter.knowledge_points)
                 .selectinload(KnowledgePoint.bullet_points)
                 .selectinload(BulletPoint.versions),
+                selectinload(Project.chapters)
+                .selectinload(Chapter.knowledge_points)
+                .selectinload(KnowledgePoint.bullet_points)
+                .selectinload(BulletPoint.sources),
             )
         )
         if project is None:
@@ -112,7 +116,7 @@ class WordExportService:
         document.core_properties.subject = "Revia 学习材料"
         version_label = "全部版本" if selected is None else VERSION_LABELS[selected]
         self.add_document_title(document, project.name, now)
-        chapters = sorted(project.chapters, key=lambda item: item.position)
+        chapters = canonical_learning_material(project.id, project.chapters).chapters
         export_kinds = ALL_VERSION_ORDER if selected is None else (selected,)
         for section_index, kind in enumerate(export_kinds):
             self.add_version_section(
@@ -121,7 +125,7 @@ class WordExportService:
                 page_break=section_index > 0,
             )
             for chapter in chapters:
-                chapter_title = self._stable_chapter_title(chapter.title)
+                chapter_title = chapter.title
                 if chapter_title:
                     self.add_chapter(document, chapter_title)
                 for knowledge_point in sorted(chapter.knowledge_points, key=lambda item: item.position):
@@ -153,13 +157,9 @@ class WordExportService:
         return list(job.item_failures or []) if job is not None else []
 
     @staticmethod
-    def _stable_chapter_title(title: str) -> str | None:
-        value = re.sub(r"\s+", " ", title).strip()
-        if not value or value in _UNRELIABLE_CHAPTER_TITLES:
-            return None
-        if _PAGE_BASED_CHAPTER.search(value):
-            return None
-        return value
+    def _stable_chapter_title(title: str | None) -> str | None:
+        value = re.sub(r"\s+", " ", title or "").strip()
+        return value if is_displayable_source_chapter(value) else None
 
     @classmethod
     def configure_document_styles(cls, document: WordDocument) -> None:
@@ -298,14 +298,14 @@ class WordExportService:
     def add_knowledge_point(
         self,
         document: WordDocument,
-        knowledge_point: KnowledgePoint,
+        knowledge_point: KnowledgePointRead,
         kind: ContentVersionKind,
     ) -> None:
         document.add_paragraph(knowledge_point.title, style=STYLE_KNOWLEDGE)
         for bullet in sorted(knowledge_point.bullet_points, key=lambda item: item.position):
             self._add_bullet_version(document, bullet, kind)
 
-    def _add_bullet_version(self, document: WordDocument, bullet: BulletPoint, kind: ContentVersionKind) -> None:
+    def _add_bullet_version(self, document: WordDocument, bullet: BulletPointRead, kind: ContentVersionKind) -> None:
         version = next((item for item in bullet.versions if item.kind == kind), None)
         if version is None:
             return
