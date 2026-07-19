@@ -141,19 +141,31 @@ class GenerationTaskRunner:
         job_id: uuid.UUID,
     ) -> None:
         lock_key = self._advisory_lock_key(job_id)
-        connection = self._bind.connect()
+        # Keep the session-level advisory lock on its own AUTOCOMMIT connection.
+        # The generation workflow must use normal, independent DB sessions so each
+        # checkpoint commit becomes visible and durable immediately. Binding the
+        # workflow Session to the lock connection would leave an outer transaction
+        # open for the entire job, making the UI appear stuck at 0/N and losing all
+        # intermediate checkpoints if the instance restarts.
+        lock_connection = self._bind.connect().execution_options(isolation_level="AUTOCOMMIT")
         try:
-            acquired = bool(connection.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": lock_key}))
+            acquired = bool(
+                lock_connection.scalar(
+                    text("SELECT pg_try_advisory_lock(:key)"),
+                    {"key": lock_key},
+                )
+            )
             if not acquired:
                 return
-            locked_factory = sessionmaker(bind=connection, autoflush=False, expire_on_commit=False)
             try:
-                self._run_service(locked_factory, workspace_id, project_id, job_id)
+                self._run_service(self._session_factory, workspace_id, project_id, job_id)
             finally:
-                connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": lock_key})
-                connection.commit()
+                lock_connection.execute(
+                    text("SELECT pg_advisory_unlock(:key)"),
+                    {"key": lock_key},
+                )
         finally:
-            connection.close()
+            lock_connection.close()
 
     def _run_service(
         self,

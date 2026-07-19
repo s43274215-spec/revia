@@ -5,7 +5,7 @@ import time
 import unittest
 import uuid
 from datetime import UTC, datetime, timedelta
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select
@@ -63,6 +63,27 @@ class GenerationTaskRunnerIsolationTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.02)
             self.assertLess(time.perf_counter() - started, 0.08)
             await task
+
+    def test_postgres_advisory_lock_does_not_wrap_checkpoint_sessions(self) -> None:
+        workspace_id = uuid.uuid4()
+        project_id = uuid.uuid4()
+        job_id = uuid.uuid4()
+        session_factory = Mock(name="session_factory")
+        lock_connection = Mock(name="lock_connection")
+        lock_connection.execution_options.return_value = lock_connection
+        lock_connection.scalar.return_value = True
+        bind = Mock(name="bind")
+        bind.dialect.name = "postgresql"
+        bind.connect.return_value = lock_connection
+        runner = GenerationTaskRunner(session_factory, Settings(ai_mode="mock"), bind)
+
+        with patch.object(runner, "_run_service") as run_service:
+            runner._run_with_postgres_lock(workspace_id, project_id, job_id)
+
+        lock_connection.execution_options.assert_called_once_with(isolation_level="AUTOCOMMIT")
+        run_service.assert_called_once_with(session_factory, workspace_id, project_id, job_id)
+        self.assertTrue(any("pg_advisory_unlock" in str(call.args[0]) for call in lock_connection.execute.call_args_list))
+        lock_connection.close.assert_called_once_with()
 
 class SyllabusAndMatchingTests(unittest.TestCase):
     def test_syllabus_parser_supports_chapters_numbering_plain_lines_and_deduplication(self) -> None:
