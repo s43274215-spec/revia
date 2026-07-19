@@ -2,7 +2,7 @@ import { KeyboardEvent, useState } from "react";
 
 export type MenuState = { x: number; y: number; pointId: string };
 
-export function ContextMenu({ menu, onSingleEdit, onGlobalEdit, onDelete }: { menu: MenuState; onSingleEdit: () => void; onGlobalEdit: () => void; onDelete: () => void }) {
+export function ContextMenu({ menu, readOnly = false, onSingleEdit, onGlobalEdit, onDelete }: { menu: MenuState; readOnly?: boolean; onSingleEdit: () => void; onGlobalEdit: () => void; onDelete: () => void }) {
   const [editOpen, setEditOpen] = useState(false);
   const openWithKeyboard = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (event.key === "ArrowRight" || event.key === "Enter" || event.key === " ") {
@@ -22,7 +22,7 @@ export function ContextMenu({ menu, onSingleEdit, onGlobalEdit, onDelete }: { me
         </div>
       </div>
       <div className="context-divider" />
-      <button className="danger" role="menuitem" onClick={onDelete}>删除要点</button>
+      <button className="danger" role="menuitem" disabled={readOnly} title={readOnly ? "演示模式不能删除内容" : undefined} onClick={onDelete}>{readOnly ? "演示模式不可删除" : "删除要点"}</button>
     </div>
   );
 }

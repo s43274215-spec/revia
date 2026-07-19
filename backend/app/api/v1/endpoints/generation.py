@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.ai.clients.base import AIConfigurationError
 from app.ai.clients.factory import build_ai_client
 from app.ai.service import AIService
-from app.auth.dependencies import WorkspaceId
+from app.auth.dependencies import WritableWorkspaceId, WorkspaceId
 from app.core.config import Settings, get_settings
 from app.db.session import get_db
 from app.matching.service import MatchingService
@@ -86,7 +86,7 @@ RuntimeSettings = Annotated[Settings, Depends(get_settings)]
 @router.post("/{project_id}/generation-jobs", response_model=GenerationJobRead, status_code=status.HTTP_202_ACCEPTED)
 async def start_generation(
     project_id: uuid.UUID,
-    workspace_id: WorkspaceId,
+    workspace_id: WritableWorkspaceId,
     db: DbSession,
     settings: RuntimeSettings,
     runner: GenerationRunner,

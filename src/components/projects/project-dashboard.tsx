@@ -6,6 +6,7 @@ import { Icon } from "@/components/learning/icons";
 import { ActiveDocument, activeDocumentStatusLabel, BackendProject, cancelDocument, createProject, getActiveDocument, listProjects } from "@/lib/revia-api";
 import { CreateProjectDialog } from "./create-project-dialog";
 import { SettingsTrigger } from "@/components/settings/settings-trigger";
+import { useAuth } from "@/components/auth/auth-provider";
 
 const dateFormatter = new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "long", day: "numeric" });
 const statusLabels: Record<BackendProject["status"], string> = {
@@ -20,6 +21,8 @@ function loadDashboardData(): Promise<[BackendProject[], ActiveDocument | null]>
 }
 
 export function ProjectDashboard() {
+  const { role } = useAuth();
+  const isDemo = role === "demo";
   const router = useRouter();
   const [projects, setProjects] = useState<BackendProject[]>([]);
   const [activeDocument, setActiveDocument] = useState<ActiveDocument | null>(null);
@@ -47,7 +50,13 @@ export function ProjectDashboard() {
     };
   }, []);
 
-  const openProject = (project: BackendProject) => router.push(project.status === "completed" ? `/projects/${project.id}/learn` : `/projects/${project.id}/upload`);
+  const openProject = (project: BackendProject) => {
+    if (isDemo && project.status !== "completed") {
+      setError("演示模式只能浏览已准备好的学习材料，不会上传、解析或重新生成内容。");
+      return;
+    }
+    router.push(project.status === "completed" ? `/projects/${project.id}/learn` : `/projects/${project.id}/upload`);
+  };
   const create = async (value: { name: string; description: string }) => {
     try {
       setError(null);
@@ -89,7 +98,7 @@ export function ProjectDashboard() {
       <section className="project-home">
         <div className="project-home-heading">
           <div><span className="entry-eyebrow">我的学习空间</span><h1>复习项目</h1><p>选择一门课程继续阅读，或创建新的复习项目。</p></div>
-          <button className="entry-primary new-project-button" onClick={() => setDialogOpen(true)}><b>＋</b>新建项目</button>
+          <button className="entry-primary new-project-button" disabled={isDemo} title={isDemo ? "演示模式不能创建项目" : undefined} onClick={() => setDialogOpen(true)}><b>＋</b>{isDemo ? "演示模式只读" : "新建项目"}</button>
         </div>
         {activeDocument && <div className="project-table active-task-table" aria-label="当前活动任务">
           <div className="project-table-header"><span>当前活动任务</span><span>处理进度</span><span>当前状态</span><span /></div>
@@ -99,12 +108,12 @@ export function ProjectDashboard() {
             <span><em className="project-status processing">{activeDocumentStatusLabel(activeDocument)}</em><small className="active-task-state">{activeDocument.processing_status} · {activeDocument.processing_phase}</small></span>
             <span className="active-task-actions">
               <button type="button" onClick={() => router.push(`/projects/${activeDocument.project_id}/upload`)}>查看进度&nbsp; →</button>
-              <button
+              {!isDemo && <button
                 type="button"
                 className="active-task-cancel"
                 disabled={cancellingDocumentId === activeDocument.document_id}
                 onClick={() => cancelActiveDocument(activeDocument)}
-              >{cancellingDocumentId === activeDocument.document_id ? "正在取消…" : "取消任务"}</button>
+              >{cancellingDocumentId === activeDocument.document_id ? "正在取消…" : "取消任务"}</button>}
             </span>
           </div>
         </div>}

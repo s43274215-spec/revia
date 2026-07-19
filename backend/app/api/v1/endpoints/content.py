@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.auth.dependencies import WorkspaceId
+from app.auth.dependencies import WritableWorkspaceId, WorkspaceId
 from app.models.content import BulletPoint, Chapter, KnowledgePoint
 from app.models.project import Project
 from sqlalchemy import select
@@ -28,7 +28,7 @@ def get_learning_material(project_id: uuid.UUID, workspace_id: WorkspaceId, db: 
 def update_bullet_point(
     bullet_point_id: uuid.UUID,
     payload: BulletPointUpdate,
-    workspace_id: WorkspaceId,
+    workspace_id: WritableWorkspaceId,
     db: DbSession,
 ) -> BulletPointRead:
     if not _bullet_belongs_to_workspace(db, workspace_id, bullet_point_id):
@@ -37,7 +37,7 @@ def update_bullet_point(
 
 
 @router.delete("/bullet-points/{bullet_point_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_bullet_point(bullet_point_id: uuid.UUID, workspace_id: WorkspaceId, db: DbSession) -> Response:
+def delete_bullet_point(bullet_point_id: uuid.UUID, workspace_id: WritableWorkspaceId, db: DbSession) -> Response:
     if not _bullet_belongs_to_workspace(db, workspace_id, bullet_point_id):
         raise HTTPException(status_code=404, detail="Bullet point was not found")
     raise HTTPException(status_code=501, detail="Bullet point deletion is not implemented")

@@ -22,7 +22,7 @@ export function useSettings() {
 }
 
 export function SettingsProvider({ children }: { children: ReactNode }) {
-  const { role } = useAuth();
+  const { role, logout } = useAuth();
   const [open, setOpen] = useState(false);
   const [configured, setConfigured] = useState(false);
   const [loadingStatus, setLoadingStatus] = useState(false);
@@ -43,6 +43,10 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
 
   const openSettings = useCallback(() => {
     setOpen(true);
+    if (role === "demo") {
+      setFeedback(null);
+      return;
+    }
     setLoadingStatus(true);
     setFeedback(null);
     getDeepSeekStatus()
@@ -119,6 +123,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
             <button aria-label="关闭设置" onClick={close}><Icon name="close" /></button>
           </header>
           <div className="settings-body">
+            {role === "demo" ? <div className="demo-settings-note"><strong>演示模式</strong><p>演示 Workspace 与站长数据隔离。可以浏览、搜索和导出 Word，但不会保存修改或发起解析、OCR 与重新生成。</p></div> : <>
             <div className="settings-status-row">
               <div><strong>连接配置</strong><p>用于生成 Revia 学习材料。</p></div>
               <span className={`settings-status ${configured ? "configured" : ""}`}>
@@ -178,6 +183,8 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
                 </span>
               </section>
             )}
+            </>}
+            <button className="workspace-logout" type="button" onClick={() => void logout()}>退出当前 Workspace</button>
           </div>
         </aside>
       </div>

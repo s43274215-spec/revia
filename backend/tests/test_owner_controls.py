@@ -28,9 +28,14 @@ from tests.test_public_beta_storage import make_pdf
 
 class OwnerAccessControlTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.owner_id = uuid.uuid4()
+        self.demo_id = uuid.uuid4()
         self.settings = Settings(
             _env_file=None,
             app_access_code="owner-access-code",
+            owner_workspace_id=self.owner_id,
+            demo_access_code="demo-access-code",
+            demo_workspace_id=self.demo_id,
             public_access_enabled=True,
         )
         self.engine = create_engine(
@@ -40,6 +45,12 @@ class OwnerAccessControlTests(unittest.TestCase):
         )
         self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
         Base.metadata.create_all(self.engine)
+        with self.Session() as db:
+            db.add_all([
+                Workspace(id=self.owner_id, role=WorkspaceRole.OWNER, owner_slot=1),
+                Workspace(id=self.demo_id, role=WorkspaceRole.PUBLIC),
+            ])
+            db.commit()
 
         def override_db():
             with self.Session() as session:
@@ -59,9 +70,12 @@ class OwnerAccessControlTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()
 
-    @staticmethod
-    def _headers(session: dict[str, str]) -> dict[str, str]:
-        return {"Authorization": f"Bearer {session['token']}"}
+    def _headers(self, session: dict[str, str]) -> dict[str, str]:
+        token = SessionTokenSigner(self.settings.session_signing_key).issue(
+            uuid.UUID(session["workspace_id"]),
+            session["role"],
+        )
+        return {"Authorization": f"Bearer {token}"}
 
     def test_owner_login_is_stable_unique_and_role_cannot_be_forged(self) -> None:
         self.assertEqual(
@@ -71,7 +85,9 @@ class OwnerAccessControlTests(unittest.TestCase):
         first = self._owner_session()
         second = self._owner_session()
         self.assertEqual(first["workspace_id"], second["workspace_id"])
+        self.assertEqual(first["workspace_id"], str(self.owner_id))
         self.assertEqual(first["role"], "owner")
+        self.assertNotIn("token", first)
         verified = self.client.get("/api/v1/auth/session", headers=self._headers(first))
         self.assertEqual(verified.json()["role"], "owner")
         with self.Session() as db:
@@ -85,6 +101,33 @@ class OwnerAccessControlTests(unittest.TestCase):
             headers={"Authorization": f"Bearer {forged}"},
         )
         self.assertEqual(rejected.status_code, 401)
+
+    def test_demo_cookie_is_http_only_and_workspace_is_read_only(self) -> None:
+        owner = self._owner_session()
+        owner_project = self.client.post(
+            "/api/v1/projects",
+            headers=self._headers(owner),
+            json={"name": "站长私有项目"},
+        ).json()
+        response = self.client.post("/api/v1/auth/access", json={"access_code": "demo-access-code"})
+        self.assertEqual(response.status_code, 200, response.text)
+        demo = response.json()
+        self.assertEqual(demo["workspace_id"], str(self.demo_id))
+        self.assertEqual(demo["role"], "demo")
+        cookie = response.headers["set-cookie"].lower()
+        self.assertIn("httponly", cookie)
+        self.assertIn("samesite=lax", cookie)
+        headers = self._headers(demo)
+        self.assertEqual(self.client.get("/api/v1/projects", headers=headers).json(), [])
+        self.assertEqual(
+            self.client.get(f"/api/v1/projects/{owner_project['id']}", headers=headers).status_code,
+            404,
+        )
+        blocked = self.client.post("/api/v1/projects", headers=headers, json={"name": "禁止创建"})
+        self.assertEqual(blocked.status_code, 403)
+        self.assertEqual(blocked.json()["detail"], "演示模式不会保存修改")
+        logout = self.client.post("/api/v1/auth/logout", headers=headers)
+        self.assertEqual(logout.status_code, 204)
 
     def test_runtime_switch_persists_blocks_public_and_keeps_owner_available(self) -> None:
         public = self.client.post("/api/v1/auth/anonymous").json()

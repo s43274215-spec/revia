@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.auth.dependencies import WorkspaceId
+from app.auth.dependencies import WritableWorkspaceId, WorkspaceId
 from app.core.config import Settings, get_settings
 from app.schemas.project import ActiveDocumentRead, ProjectCreate, ProjectRead, ProjectUpdate
 from app.services.projects import ProjectNotFoundError, ProjectService
@@ -21,7 +21,7 @@ def list_projects(workspace_id: WorkspaceId, db: DbSession) -> list[ProjectRead]
 
 
 @router.post("", response_model=ProjectRead, status_code=status.HTTP_201_CREATED)
-def create_project(payload: ProjectCreate, workspace_id: WorkspaceId, db: DbSession) -> ProjectRead:
+def create_project(payload: ProjectCreate, workspace_id: WritableWorkspaceId, db: DbSession) -> ProjectRead:
     return ProjectRead.model_validate(ProjectService(db).create(workspace_id, payload))
 
 
@@ -54,7 +54,7 @@ def get_project(project_id: uuid.UUID, workspace_id: WorkspaceId, db: DbSession)
 
 
 @router.patch("/{project_id}", response_model=ProjectRead)
-def update_project(project_id: uuid.UUID, payload: ProjectUpdate, workspace_id: WorkspaceId, db: DbSession) -> ProjectRead:
+def update_project(project_id: uuid.UUID, payload: ProjectUpdate, workspace_id: WritableWorkspaceId, db: DbSession) -> ProjectRead:
     try:
         return ProjectRead.model_validate(ProjectService(db).update(workspace_id, project_id, payload))
     except ProjectNotFoundError as exc:
@@ -64,7 +64,7 @@ def update_project(project_id: uuid.UUID, payload: ProjectUpdate, workspace_id: 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_project(
     project_id: uuid.UUID,
-    workspace_id: WorkspaceId,
+    workspace_id: WritableWorkspaceId,
     db: DbSession,
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> Response:

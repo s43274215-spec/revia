@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Chapter, Project } from "./data";
 import { Icon } from "./icons";
 import { SettingsTrigger } from "@/components/settings/settings-trigger";
@@ -28,9 +28,19 @@ export function ProjectSidebar({ projects, activeProjectId, onSelect }: { projec
   );
 }
 
-export function OutlineSidebar({ project, progress, onNavigate, partialJob }: { project: Project; progress: number; onNavigate: (id: string) => void; partialJob: GenerationJob | null }) {
+export function OutlineSidebar({ project, progress, activeId, onNavigate, partialJob }: { project: Project; progress: number; activeId: string | null; onNavigate: (id: string) => void; partialJob: GenerationJob | null }) {
   const [expandedFailure, setExpandedFailure] = useState<number | null>(null);
+  const itemRefs = useRef(new Map<string, HTMLButtonElement>());
   const failures = partialJob?.item_failures ?? [];
+
+  useEffect(() => {
+    if (activeId) itemRefs.current.get(activeId)?.scrollIntoView({ block: "nearest" });
+  }, [activeId]);
+
+  const itemRef = (id: string) => (element: HTMLButtonElement | null) => {
+    if (element) itemRefs.current.set(id, element);
+    else { itemRefs.current.delete(id); }
+  };
 
   return (
     <aside className="outline-sidebar" aria-label="本页目录">
@@ -38,9 +48,9 @@ export function OutlineSidebar({ project, progress, onNavigate, partialJob }: { 
       <nav className="outline-nav">
         {project.chapters.map((chapter: Chapter) => (
           <div className="outline-chapter" key={chapter.id}>
-            <button onClick={() => onNavigate(chapter.id)}><span>{chapter.number}</span>{chapter.title}</button>
+            <button ref={itemRef(chapter.id)} className={activeId === chapter.id ? "is-active" : ""} aria-current={activeId === chapter.id ? "location" : undefined} onClick={() => onNavigate(chapter.id)}><span>{chapter.number}</span>{chapter.title}</button>
             <div className="outline-points">
-              {chapter.points.map((point) => <button key={point.id} onClick={() => onNavigate(point.id)}>{point.title}</button>)}
+              {chapter.points.map((point) => <button ref={itemRef(point.id)} className={activeId === point.id ? "is-active" : ""} aria-current={activeId === point.id ? "location" : undefined} key={point.id} onClick={() => onNavigate(point.id)}>{point.title}</button>)}
             </div>
           </div>
         ))}

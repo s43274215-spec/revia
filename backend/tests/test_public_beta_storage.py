@@ -304,9 +304,11 @@ class PublicWorkspaceIsolationAPITests(unittest.TestCase):
     def test_two_public_workspaces_are_isolated_and_unauthorized_is_401(self) -> None:
         first = self.client.post("/api/v1/auth/anonymous").json()
         second = self.client.post("/api/v1/auth/anonymous").json()
-        first_headers = {"Authorization": f"Bearer {first['token']}"}
-        second_headers = {"Authorization": f"Bearer {second['token']}"}
+        signer = SessionTokenSigner(self.settings.session_signing_key)
+        first_headers = {"Authorization": f"Bearer {signer.issue(uuid.UUID(first['workspace_id']), 'public')}"}
+        second_headers = {"Authorization": f"Bearer {signer.issue(uuid.UUID(second['workspace_id']), 'public')}"}
         project = self.client.post("/api/v1/projects", headers=first_headers, json={"name": "私有项目"}).json()
+        self.client.cookies.clear()
         self.assertEqual(self.client.get("/api/v1/projects").status_code, 401)
         self.assertEqual(self.client.get(f"/api/v1/projects/{project['id']}", headers=second_headers).status_code, 404)
         self.assertEqual(self.client.get("/api/v1/projects", headers=second_headers).json(), [])

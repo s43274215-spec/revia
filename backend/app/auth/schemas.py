@@ -8,7 +8,6 @@ class AccessCodeRequest(BaseModel):
 
 
 class WorkspaceSessionRead(BaseModel):
-    token: str
     workspace_id: uuid.UUID
     role: str
 
@@ -20,3 +19,4 @@ class WorkspaceRead(BaseModel):
 
 class AccessModeRead(BaseModel):
     public_access_enabled: bool
+    demo_access_enabled: bool

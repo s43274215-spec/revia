@@ -36,6 +36,13 @@ class ParsedPageData:
 
 
 @dataclass(frozen=True)
+class SourceOutlineEntry:
+    level: int
+    title: str
+    page_number: int
+
+
+@dataclass(frozen=True)
 class ExtractedPageData:
     page_number: int
     text: str
@@ -52,6 +59,7 @@ class ParsedPDF:
     ocr_executed: bool
     ocr_page_count: int
     ocr_error: str | None
+    outline: tuple[SourceOutlineEntry, ...] = ()
 
     @property
     def raw_text(self) -> str:
@@ -91,6 +99,7 @@ class PDFParser:
         try:
             with fitz.open(path) as document:
                 self.validate_document(document)
+                outline = self.extract_outline(document)
                 pages: list[ParsedPageData] = []
                 ocr_page_count = 0
                 ocr_failures: list[str] = []
@@ -124,6 +133,7 @@ class PDFParser:
                     ocr_executed=ocr_executed,
                     ocr_page_count=ocr_page_count,
                     ocr_error="；".join(ocr_failures) if ocr_failures else None,
+                    outline=outline,
                 )
         except PDFParsingError:
             raise
@@ -138,6 +148,17 @@ class PDFParser:
         if document.page_count > self._max_pages:
             raise PDFParsingError(f"PDF 页数不能超过 {self._max_pages} 页")
         return document.page_count
+
+    @staticmethod
+    def extract_outline(document: fitz.Document) -> tuple[SourceOutlineEntry, ...]:
+        entries: list[SourceOutlineEntry] = []
+        for raw in document.get_toc(simple=True):
+            if len(raw) < 3:
+                continue
+            level, title, page_number = int(raw[0]), " ".join(str(raw[1]).split()), int(raw[2])
+            if level > 0 and title and 1 <= page_number <= document.page_count:
+                entries.append(SourceOutlineEntry(level=level, title=title[:300], page_number=page_number))
+        return tuple(entries)
 
     def inspect(self, path: Path) -> int:
         try:

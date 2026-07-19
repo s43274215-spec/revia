@@ -290,6 +290,7 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
 
   if (loadingProject) return <main className="entry-page entry-loading">正在读取项目…</main>;
   if (!project) return <main className="entry-page missing-project"><h1>未找到项目</h1><button onClick={() => router.push("/")}>返回项目列表</button></main>;
+  if (role === "demo") return <main className="entry-page missing-project"><h1>演示模式不会处理资料</h1><p>请返回项目列表，选择已准备好的演示学习材料。</p><button onClick={() => router.push("/")}>返回项目列表</button></main>;
 
   const statusLabel = generationReconnecting
     ? "正在重新连接"
