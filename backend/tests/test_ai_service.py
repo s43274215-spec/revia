@@ -20,7 +20,8 @@ class AIServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("keywords 压缩为关键概念和记忆线索", project_prompt)
         self.assertIn("保留资料核心原始内容和完整表达", item_prompt)
         self.assertIn("保持当前要点知识完整性的前提下", item_prompt)
-        self.assertIn("压缩为 3—8 个能唤醒记忆的关键概念", item_prompt)
+        self.assertIn("通常建议 3—8 个，内容确有需要时允许 1—50 个", item_prompt)
+        self.assertIn("不得为压缩字数丢失关键得分点", item_prompt)
 
     async def test_mock_generation_matches_revia_structure(self) -> None:
         project_id = uuid.uuid4()
