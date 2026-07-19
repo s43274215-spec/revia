@@ -1,4 +1,4 @@
-import { apiRequest } from "./api-base";
+import { API_BASE_URL, apiRequest } from "./api-base";
 
 export type BackendProjectStatus = "not_uploaded" | "processing" | "completed" | "failed";
 
@@ -218,4 +218,26 @@ export function getLatestGenerationJob(projectId: string): Promise<GenerationJob
 
 export function getLearningMaterial(projectId: string): Promise<LearningMaterialResponse> {
   return apiRequest<LearningMaterialResponse>(`/projects/${projectId}/learning-material`);
+}
+
+export async function downloadWordExport(
+  projectId: string,
+  version: "original" | "recitation" | "keywords" | "all",
+): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/projects/${projectId}/exports/word?version=${version}`, {
+    credentials: "include",
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(body?.detail || `Word 导出失败（HTTP ${response.status}）`);
+  }
+  const disposition = response.headers.get("content-disposition") || "";
+  const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  const filename = encodedName ? decodeURIComponent(encodedName) : "Revia学习材料.docx";
+  const url = URL.createObjectURL(await response.blob());
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }

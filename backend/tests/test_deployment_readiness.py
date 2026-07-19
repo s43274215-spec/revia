@@ -16,6 +16,7 @@ from sqlalchemy.pool import StaticPool
 
 import app.models  # noqa: F401
 from app.core.config import Settings, get_settings
+from app.auth.security import SessionTokenSigner
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
@@ -53,25 +54,23 @@ class AccessControlTests(unittest.TestCase):
 
         issued = self.client.post("/api/v1/auth/access", json={"access_code": "test-access-code"})
         self.assertEqual(issued.status_code, 200, issued.text)
-        token = issued.json()["token"]
         workspace_id = issued.json()["workspace_id"]
-        verified = self.client.get(
-            "/api/v1/auth/session",
-            headers={"Authorization": f"Bearer {token}"},
-        )
+        self.assertNotIn("token", issued.json())
+        self.assertIn("httponly", issued.headers["set-cookie"].lower())
+        verified = self.client.get("/api/v1/auth/session")
         self.assertEqual(verified.json(), {"workspace_id": workspace_id, "role": "owner"})
         repeated = self.client.post("/api/v1/auth/access", json={"access_code": "test-access-code"})
         self.assertEqual(repeated.json()["workspace_id"], workspace_id)
 
         tampered = self.client.get(
             "/api/v1/auth/session",
-            headers={"Authorization": f"Bearer {token[:-1]}x"},
+            headers={"Authorization": "Bearer invalid.tampered"},
         )
         self.assertEqual(tampered.status_code, 401)
 
     def test_public_mode_issues_anonymous_workspace_and_private_mode_hides_endpoint(self) -> None:
         mode = self.client.get("/api/v1/auth/mode")
-        self.assertEqual(mode.json(), {"public_access_enabled": False})
+        self.assertEqual(mode.json(), {"public_access_enabled": False, "demo_access_enabled": False})
         self.assertEqual(self.client.post("/api/v1/auth/anonymous").status_code, 403)
 
         with self.Session() as session:
@@ -81,16 +80,17 @@ class AccessControlTests(unittest.TestCase):
         app.dependency_overrides[get_settings] = lambda: public_settings
         self.assertEqual(
             self.client.get("/api/v1/auth/mode").json(),
-            {"public_access_enabled": True},
+            {"public_access_enabled": True, "demo_access_enabled": False},
         )
         first = self.client.post("/api/v1/auth/anonymous")
         second = self.client.post("/api/v1/auth/anonymous")
         self.assertEqual(first.status_code, 200, first.text)
         self.assertNotEqual(first.json()["workspace_id"], second.json()["workspace_id"])
-        session = self.client.get(
-            "/api/v1/auth/session",
-            headers={"Authorization": f"Bearer {first.json()['token']}"},
+        first_token = SessionTokenSigner(public_settings.session_signing_key).issue(
+            uuid.UUID(first.json()["workspace_id"]),
+            "public",
         )
+        session = self.client.get("/api/v1/auth/session", headers={"Authorization": f"Bearer {first_token}"})
         self.assertEqual(session.status_code, 200)
 
 
@@ -122,6 +122,9 @@ class ProductionConfigurationTests(unittest.TestCase):
             "session_signing_key": "production-signing-key-with-more-than-32-bytes",
             "credential_encryption_key": Fernet.generate_key().decode(),
             "ai_mode": "live",
+            "owner_workspace_id": uuid.uuid4(),
+            "demo_access_code": "private-demo-access",
+            "demo_workspace_id": uuid.uuid4(),
         }
         with self.assertRaisesRegex(ValidationError, "STORAGE_BACKEND"):
             Settings(_env_file=None, **common)

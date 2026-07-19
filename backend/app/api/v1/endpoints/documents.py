@@ -9,7 +9,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPExcepti
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.auth.dependencies import WorkspaceId
+from app.auth.dependencies import CurrentWorkspace, WritableWorkspaceId, WorkspaceId
 from app.core.config import Settings, get_settings
 from app.db.session import get_db
 from app.document.parser import PDFParser
@@ -100,7 +100,7 @@ def create_document_upload(
     project_id: uuid.UUID,
     payload: DocumentUploadCreate,
     request: Request,
-    workspace_id: WorkspaceId,
+    workspace_id: WritableWorkspaceId,
     settings: Annotated[Settings, Depends(get_settings)],
     service: DocumentService,
 ) -> DocumentUploadTargetRead:
@@ -197,7 +197,7 @@ def get_syllabus(
 def confirm_document_upload(
     project_id: uuid.UUID,
     document_id: uuid.UUID,
-    workspace_id: WorkspaceId,
+    workspace_id: WritableWorkspaceId,
     service: DocumentService,
     runner: DocumentRunner,
     background_tasks: BackgroundTasks,
@@ -219,23 +219,24 @@ def confirm_document_upload(
 def get_latest_document(
     project_id: uuid.UUID,
     kind: DocumentKind,
-    workspace_id: WorkspaceId,
+    workspace: CurrentWorkspace,
     service: DocumentService,
     runner: DocumentRunner,
     background_tasks: BackgroundTasks,
 ) -> DocumentProgressRead | None:
     try:
-        document = service.latest_document(workspace_id, project_id, kind)
+        document = service.latest_document(workspace.id, project_id, kind)
     except DocumentProjectNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     if document is None:
         return None
-    if document.processing_status == DocumentProcessingStatus.UPLOADED:
+    if workspace.access_mode != "demo" and document.processing_status == DocumentProcessingStatus.UPLOADED:
         try:
-            document = service.confirm_upload(workspace_id, project_id, document.id)
+            document = service.confirm_upload(workspace.id, project_id, document.id)
         except (DocumentProcessingError, StorageError):
             pass
-    _schedule_resume(document, runner, background_tasks)
+    if workspace.access_mode != "demo":
+        _schedule_resume(document, runner, background_tasks)
     return _progress(document, service.queue_position(document))
 
 
@@ -243,16 +244,17 @@ def get_latest_document(
 def get_document_progress(
     project_id: uuid.UUID,
     document_id: uuid.UUID,
-    workspace_id: WorkspaceId,
+    workspace: CurrentWorkspace,
     service: DocumentService,
     runner: DocumentRunner,
     background_tasks: BackgroundTasks,
 ) -> DocumentProgressRead:
     try:
-        document = service.get_document(workspace_id, project_id, document_id)
+        document = service.get_document(workspace.id, project_id, document_id)
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    _schedule_resume(document, runner, background_tasks)
+    if workspace.access_mode != "demo":
+        _schedule_resume(document, runner, background_tasks)
     return _progress(document, service.queue_position(document))
 
 
@@ -260,7 +262,7 @@ def get_document_progress(
 def cancel_document(
     project_id: uuid.UUID,
     document_id: uuid.UUID,
-    workspace_id: WorkspaceId,
+    workspace_id: WritableWorkspaceId,
     service: DocumentService,
 ) -> DocumentProgressRead:
     try:
@@ -275,7 +277,7 @@ def cancel_document(
 @router.post("/{project_id}/document-cleanup/expired")
 def cleanup_expired_documents(
     project_id: uuid.UUID,
-    workspace_id: WorkspaceId,
+    workspace_id: WritableWorkspaceId,
     db: Annotated[Session, Depends(get_db)],
     settings: Annotated[Settings, Depends(get_settings)],
     older_than_hours: Annotated[int, Query(ge=1, le=24 * 30)] = 72,
@@ -318,7 +320,7 @@ async def upload_document_legacy(
     project_id: uuid.UUID,
     kind: Annotated[DocumentKind, Form()],
     file: Annotated[UploadFile, File()],
-    workspace_id: WorkspaceId,
+    workspace_id: WritableWorkspaceId,
     service: DocumentService,
 ) -> DocumentProcessingRead:
     try:
@@ -345,7 +347,7 @@ async def upload_document_legacy(
 def upsert_syllabus(
     project_id: uuid.UUID,
     payload: SyllabusUpsert,
-    workspace_id: WorkspaceId,
+    workspace_id: WritableWorkspaceId,
     db: Annotated[Session, Depends(get_db)],
 ) -> Response:
     try:

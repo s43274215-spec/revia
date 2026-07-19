@@ -4,7 +4,7 @@ import hmac
 import json
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 
 class SessionTokenError(ValueError):
@@ -24,12 +24,14 @@ class SessionTokenSigner:
             raise ValueError("SESSION_SIGNING_KEY must contain at least 32 bytes")
         self._key = key
 
-    def issue(self, workspace_id: uuid.UUID, role: str = "public") -> str:
+    def issue(self, workspace_id: uuid.UUID, role: str = "public", max_age_seconds: int = 60 * 60 * 24 * 30) -> str:
+        now = datetime.now(UTC)
         payload = {
-            "version": 2,
+            "version": 3,
             "workspace_id": str(workspace_id),
             "role": role,
-            "issued_at": datetime.now(UTC).isoformat(),
+            "issued_at": now.isoformat(),
+            "expires_at": (now + timedelta(seconds=max_age_seconds)).isoformat(),
         }
         encoded = self._encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
         signature = self._sign(encoded)
@@ -43,11 +45,13 @@ class SessionTokenSigner:
                 raise SessionTokenError("Invalid workspace token signature")
             payload = json.loads(self._decode(encoded))
             version = payload.get("version")
-            if version not in {1, 2}:
+            if version not in {1, 2, 3}:
                 raise SessionTokenError("Unsupported workspace token version")
             role = "public" if version == 1 else str(payload["role"])
-            if role not in {"owner", "public"}:
+            if role not in {"owner", "demo", "public"}:
                 raise SessionTokenError("Invalid workspace role")
+            if version == 3 and datetime.fromisoformat(str(payload["expires_at"])) <= datetime.now(UTC):
+                raise SessionTokenError("Workspace token has expired")
             return SessionTokenClaims(workspace_id=uuid.UUID(str(payload["workspace_id"])), role=role)
         except SessionTokenError:
             raise

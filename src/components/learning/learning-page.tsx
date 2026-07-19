@@ -1,6 +1,6 @@
 "use client";
 
-import { MouseEvent, UIEvent, useCallback, useEffect, useRef, useState } from "react";
+import { MouseEvent, UIEvent, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ContextMenu, MenuState } from "./context-menu";
 import { BulletPoint, PointVersions, Project, Version, VersionPoint } from "./data";
@@ -8,11 +8,15 @@ import { DrawerState, OperationDrawer } from "./keyword-drawer";
 import { ReadingContent } from "./reading-content";
 import { OutlineSidebar, ProjectSidebar } from "./sidebars";
 import { Toolbar } from "./toolbar";
-import { GenerationJob, GenerationStatus, getBackendProject, getGenerationJob, getLatestGenerationJob, getLearningMaterial, listProjects, startGeneration } from "@/lib/revia-api";
+import { SearchResults } from "./search-results";
+import { searchProject } from "./reader-search";
+import { classifyContentBlocks } from "./content-format";
+import { GenerationJob, GenerationStatus, downloadWordExport, getBackendProject, getGenerationJob, getLatestGenerationJob, getLearningMaterial, listProjects, startGeneration } from "@/lib/revia-api";
 import { isTransientNetworkError, SinglePromiseGate } from "@/lib/generation-reliability";
 import { toLearningProject, toProjectShell } from "@/lib/learning-material-adapter";
+import { useAuth } from "@/components/auth/auth-provider";
 
-const tabs: { id: Version; label: string }[] = [{ id: "original", label: "原文" }, { id: "recitation", label: "背诵版" }, { id: "keywords", label: "关键词" }];
+const tabs: { id: Version; label: string }[] = [{ id: "keywords", label: "简洁版" }, { id: "recitation", label: "标准版" }, { id: "original", label: "详细版" }];
 type History = { past: Project[][]; present: Project[]; future: Project[][] };
 const terminalGenerationStatuses = new Set<GenerationStatus>(["completed", "partial_failed", "failed"]);
 const generationStatusLabels: Record<GenerationStatus, string> = {
@@ -31,6 +35,8 @@ function updatePoint(projects: Project[], projectId: string, pointId: string, up
 }
 
 export function LearningPage({ projectId }: { projectId: string }) {
+  const { role } = useAuth();
+  const isDemo = role === "demo";
   const router = useRouter();
   const [history, setHistory] = useState<History>({ past: [], present: [], future: [] });
   const [activeProjectId, setActiveProjectId] = useState<string | null>(projectId);
@@ -41,16 +47,28 @@ export function LearningPage({ projectId }: { projectId: string }) {
   const [drawer, setDrawer] = useState<DrawerState | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
   const [generationJob, setGenerationJob] = useState<GenerationJob | null>(null);
   const [generationError, setGenerationError] = useState<string | null>(null);
   const [generationStarting, setGenerationStarting] = useState(false);
   const [generationReconnecting, setGenerationReconnecting] = useState(false);
   const [partialGenerationJob, setPartialGenerationJob] = useState<GenerationJob | null>(null);
   const [readingProgress, setReadingProgress] = useState(0);
+  const [activeOutlineId, setActiveOutlineId] = useState<string | null>(null);
+  const [activeSearchIndex, setActiveSearchIndex] = useState(0);
   const readingRef = useRef<HTMLDivElement>(null);
+  const navigationSuppressedUntilRef = useRef(0);
   const generationStartGateRef = useRef(new SinglePromiseGate<GenerationJob>());
   const generationAttemptedAtRef = useRef(0);
   const activeProject = history.present.find((project) => project.id === activeProjectId) ?? null;
+  const deferredQuery = useDeferredValue(query.trim());
+  const effectiveQuery = query.trim() ? deferredQuery : "";
+  const searchResults = useMemo(
+    () => activeProject ? searchProject(activeProject, version, effectiveQuery, classifyContentBlocks) : [],
+    [activeProject, effectiveQuery, version],
+  );
+  const activeSearchTarget = searchResults[activeSearchIndex]?.targetId;
 
   const loadProjects = useCallback(async () => {
     const [project, material, projects, latestJob] = await Promise.all([
@@ -150,6 +168,25 @@ export function LearningPage({ projectId }: { projectId: string }) {
     return () => { cancelAnimationFrame(frame); observer.disconnect(); };
   }, [activeProjectId, version, history.present, calculateProgress]);
 
+  useEffect(() => {
+    const root = readingRef.current;
+    if (!root || !activeProject) return;
+    const visible = new Map<Element, IntersectionObserverEntry>();
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => entry.isIntersecting ? visible.set(entry.target, entry) : visible.delete(entry.target));
+      if (Date.now() < navigationSuppressedUntilRef.current || visible.size === 0) return;
+      const next = [...visible.values()].sort((left, right) => {
+        const distance = Math.abs(left.boundingClientRect.top - (left.rootBounds?.top ?? 0));
+        const otherDistance = Math.abs(right.boundingClientRect.top - (right.rootBounds?.top ?? 0));
+        if (distance !== otherDistance) return distance - otherDistance;
+        return Number(right.target.classList.contains("knowledge-section")) - Number(left.target.classList.contains("knowledge-section"));
+      })[0];
+      if ((next.target as HTMLElement).id) setActiveOutlineId((next.target as HTMLElement).id);
+    }, { root, rootMargin: "-10% 0px -72% 0px", threshold: [0, 0.01, 1] });
+    root.querySelectorAll<HTMLElement>(".chapter-section,.knowledge-section").forEach((element) => observer.observe(element));
+    return () => observer.disconnect();
+  }, [activeProject, version]);
+
   const commit = (next: Project[]) => setHistory((current) => ({ past: [...current.past, current.present], present: next, future: [] }));
   const undo = () => setHistory((current) => current.past.length ? ({ past: current.past.slice(0, -1), present: current.past.at(-1)!, future: [current.present, ...current.future] }) : current);
   const redo = () => setHistory((current) => current.future.length ? ({ past: [...current.past, current.present], present: current.future[0], future: current.future.slice(1) }) : current);
@@ -161,10 +198,32 @@ export function LearningPage({ projectId }: { projectId: string }) {
     const readingArea = readingRef.current;
     if (readingArea) { readingArea.style.scrollBehavior = "auto"; readingArea.scrollTop = 0; }
     setActiveProjectId((current) => current === id ? null : id);
-    setDrawer(null); setMenu(null); setQuery(""); setReadingProgress(0);
+    setDrawer(null); setMenu(null); setQuery(""); setActiveSearchIndex(0); setReadingProgress(0);
     if (readingArea) requestAnimationFrame(() => { readingArea.scrollTop = 0; readingArea.style.removeProperty("scroll-behavior"); calculateProgress(readingArea); });
   };
-  const navigate = (id: string) => readingRef.current?.querySelector<HTMLElement>(`#${CSS.escape(id)}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  const scrollToTarget = (id: string) => {
+    const readingArea = readingRef.current;
+    const target = readingArea?.querySelector<HTMLElement>(`#${CSS.escape(id)}`);
+    if (!readingArea || !target) return;
+    const top = target.getBoundingClientRect().top - readingArea.getBoundingClientRect().top + readingArea.scrollTop - 24;
+    readingArea.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+  };
+  const navigate = (id: string) => {
+    navigationSuppressedUntilRef.current = Date.now() + 900;
+    setActiveOutlineId(id);
+    scrollToTarget(id);
+  };
+  const selectSearchResult = (index: number) => {
+    if (!searchResults.length) return;
+    const nextIndex = (index + searchResults.length) % searchResults.length;
+    const result = searchResults[nextIndex];
+    setActiveSearchIndex(nextIndex);
+    navigationSuppressedUntilRef.current = Date.now() + 900;
+    const target = readingRef.current?.querySelector<HTMLElement>(`#${CSS.escape(result.targetId)}`);
+    const outlineTarget = target?.closest<HTMLElement>(".knowledge-section,.chapter-section");
+    if (outlineTarget?.id) setActiveOutlineId(outlineTarget.id);
+    scrollToTarget(result.targetId);
+  };
   const openContext = (event: MouseEvent, point: BulletPoint) => { event.preventDefault(); const width = 168; const height = 100; setMenu({ pointId: point.id, x: Math.min(event.clientX, window.innerWidth - width - 8), y: Math.min(event.clientY, window.innerHeight - height - 8) }); };
   const selectedPoint = activeProject?.chapters.flatMap((chapter) => chapter.points.flatMap((point) => point.bulletPoints)).find((point) => point.id === menu?.pointId);
   const edit = (mode: "single" | "global") => { if (selectedPoint) setDrawer({ mode, point: selectedPoint, version }); setMenu(null); };
@@ -172,6 +231,7 @@ export function LearningPage({ projectId }: { projectId: string }) {
   const saveSingle = (pointId: string, editedVersion: Version, value: VersionPoint) => { if (!activeProject) return; commit(updatePoint(history.present, activeProject.id, pointId, (point) => ({ ...point, versions: { ...point.versions, [editedVersion]: value } }))); setDrawer(null); };
   const saveGlobal = (pointId: string, versions: PointVersions) => { if (!activeProject) return; commit(updatePoint(history.present, activeProject.id, pointId, (point) => ({ ...point, versions }))); setDrawer(null); };
   const regenerate = async () => {
+    if (isDemo) return;
     if ((generationJob && generationJob.status !== "failed") || generationReconnecting || generationStartGateRef.current.pending) return;
     generationAttemptedAtRef.current = Date.now();
     setGenerationJob(null);
@@ -193,22 +253,37 @@ export function LearningPage({ projectId }: { projectId: string }) {
     }
   };
 
+  const exportWord = async (scope: "current" | "all") => {
+    if (!activeProject || exporting) return;
+    setExporting(true);
+    setExportError(null);
+    try {
+      await downloadWordExport(activeProject.id, scope === "all" ? "all" : version);
+      setExportOpen(false);
+    } catch (reason) {
+      setExportError(reason instanceof Error ? reason.message : "Word 导出失败");
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (
     <main className="learning-shell" onClick={() => setMenu(null)}>
       <ProjectSidebar projects={history.present} activeProjectId={activeProjectId} onSelect={selectProject} />
       {loading ? <section className="project-empty"><div><span>复习项目</span><h1>正在读取学习材料</h1><p>正在从 Revia 后端加载当前项目。</p></div></section> : loadError ? <section className="project-empty"><div><span>复习项目</span><h1>无法读取学习材料</h1><p>{loadError}</p></div></section> : !activeProject ? <section className="project-empty"><div><span>复习项目</span><h1>选择一个项目继续阅读</h1><p>从左侧项目列表进入对应的课程复习材料。</p></div></section> : activeProject.chapters.length === 0 ? <section className="project-empty"><div><span>复习项目</span><h1>暂无生成内容</h1><p>当前项目还没有可供阅读的学习材料。</p></div></section> : <>
-        <OutlineSidebar project={activeProject} progress={readingProgress} onNavigate={navigate} partialJob={partialGenerationJob} />
+        <OutlineSidebar project={activeProject} progress={readingProgress} activeId={activeOutlineId} onNavigate={navigate} partialJob={partialGenerationJob} />
         <section className="workspace">
-          <Toolbar query={query} onQueryChange={setQuery} onExport={() => setExportOpen((value) => !value)} onRegenerate={regenerate} regenerating={Boolean(generationJob) || generationStarting || generationReconnecting} onUndo={undo} onRedo={redo} canUndo={history.past.length > 0} canRedo={history.future.length > 0} />
-          {exportOpen && <div className="export-menu"><span>导出</span><button onClick={() => setExportOpen(false)}>Word</button></div>}
+          <Toolbar query={query} onQueryChange={(value) => { setQuery(value); setActiveSearchIndex(0); }} onExport={() => { setExportOpen((value) => !value); setExportError(null); }} onRegenerate={regenerate} regenerating={Boolean(generationJob) || generationStarting || generationReconnecting} regenerationDisabled={isDemo} onUndo={undo} onRedo={redo} canUndo={history.past.length > 0} canRedo={history.future.length > 0} />
+          <SearchResults query={effectiveQuery} results={searchResults} activeIndex={activeSearchIndex} onSelect={selectSearchResult} onPrevious={() => selectSearchResult(activeSearchIndex - 1)} onNext={() => selectSearchResult(activeSearchIndex + 1)} onClear={() => { setQuery(""); setActiveSearchIndex(0); }} />
+          {exportOpen && <div className="export-menu"><span>导出 Word</span><button disabled={exporting} onClick={() => void exportWord("current")}>导出当前版本</button><button disabled={exporting} onClick={() => void exportWord("all")}>导出全部版本</button>{exportError && <p role="alert">{exportError}</p>}</div>}
           <div className="version-bar" role="tablist" aria-label="内容版本">
-            {tabs.map((tab) => <button role="tab" aria-selected={version === tab.id} className={version === tab.id ? "is-active" : ""} key={tab.id} onClick={() => { setVersion(tab.id); setDrawer(null); }}>{tab.label}</button>)}
+            {tabs.map((tab) => <button role="tab" aria-selected={version === tab.id} className={version === tab.id ? "is-active" : ""} key={tab.id} onClick={() => { setVersion(tab.id); setActiveSearchIndex(0); setDrawer(null); }}>{tab.label}</button>)}
           </div>
-          <div className="reading-scroll" ref={readingRef} onScroll={(event: UIEvent<HTMLDivElement>) => calculateProgress(event.currentTarget)}><ReadingContent project={activeProject} version={version} query={query} partialJob={partialGenerationJob} onKeyword={(point) => { if (version === "keywords") setDrawer({ mode: "keyword", point }); }} onPointContext={openContext} /></div>
-          {drawer && <OperationDrawer key={`${drawer.mode}-${drawer.point.id}-${drawer.mode === "keyword" ? "recitation" : drawer.version}`} state={drawer} onClose={() => setDrawer(null)} onSaveSingle={saveSingle} onSaveGlobal={saveGlobal} />}
+          <div className="reading-scroll" ref={readingRef} onScroll={(event: UIEvent<HTMLDivElement>) => calculateProgress(event.currentTarget)}><ReadingContent project={activeProject} version={version} query={effectiveQuery} activeTargetId={activeSearchTarget} partialJob={partialGenerationJob} onKeyword={(point) => { if (version === "keywords") setDrawer({ mode: "keyword", point }); }} onPointContext={openContext} /></div>
+          {drawer && <OperationDrawer key={`${drawer.mode}-${drawer.point.id}-${drawer.mode === "keyword" ? "recitation" : drawer.version}`} state={drawer} demoMode={isDemo} onClose={() => setDrawer(null)} onSaveSingle={saveSingle} onSaveGlobal={saveGlobal} />}
         </section>
       </>}
-      {menu && <ContextMenu menu={menu} onSingleEdit={() => edit("single")} onGlobalEdit={() => edit("global")} onDelete={remove} />}
+      {menu && <ContextMenu menu={menu} readOnly={isDemo} onSingleEdit={() => edit("single")} onGlobalEdit={() => edit("global")} onDelete={remove} />}
       {(generationJob || generationError || generationStarting || generationReconnecting) && <div className="generation-overlay" role="status"><div>{!generationError && <i />}<span>{generationError ? "重新生成失败" : generationReconnecting ? "正在重新连接" : generationStarting ? "正在提交重新生成任务" : generationStatusLabels[generationJob!.status]}</span><h2>{generationError ? "无法重新生成学习材料" : "重新生成学习材料"}</h2><p>{generationError || (generationReconnecting ? "连接暂时中断，正在继续查询已有任务，不会重复创建。" : generationJob && generationJob.total_items > 0 ? `已处理 ${generationJob.processed_items} / ${generationJob.total_items} 项 · ${generationJob.progress}%` : "正在基于现有资料生成新的学习材料，请稍候。")}</p>{generationError && <div className="generation-error-actions"><button onClick={() => { setGenerationJob(null); setGenerationError(null); }}>取消</button><button className="entry-primary" onClick={() => { void regenerate(); }}>重试</button></div>}</div></div>}
     </main>
   );

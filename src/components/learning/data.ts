@@ -124,4 +124,4 @@ export const initialProjects: Project[] = rawProjects.map((project) => ({
   })),
 }));
 
-export const versionLabels: Record<Version, string> = { original: "原文", recitation: "背诵版", keywords: "关键词" };
+export const versionLabels: Record<Version, string> = { original: "详细版", recitation: "标准版", keywords: "简洁版" };

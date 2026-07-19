@@ -1,4 +1,5 @@
 import json
+import uuid
 from functools import lru_cache
 from typing import Annotated, Literal
 
@@ -28,8 +29,13 @@ class Settings(BaseSettings):
         "http://[::1]:3000",
     ]
     app_access_code: str = "revia-local"
+    owner_access_code: str = ""
+    owner_workspace_id: uuid.UUID | None = None
+    demo_access_code: str = ""
+    demo_workspace_id: uuid.UUID | None = None
     public_access_enabled: bool = False
     session_signing_key: str = "revia-local-session-signing-key-change-me"
+    session_max_age_seconds: int = 60 * 60 * 24 * 30
     credential_encryption_key: str = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
     ai_mode: Literal["mock", "live"] = "mock"
     ai_provider: str = "deepseek"
@@ -105,11 +111,23 @@ class Settings(BaseSettings):
             self.global_rolling_24h_page_limit,
         ) <= 0:
             raise ValueError("Document quota limits must be positive integers")
-        if self.upload_url_expires_seconds <= 0 or self.document_lease_seconds <= 0 or self.generation_stale_seconds <= 0:
+        if min(
+            self.upload_url_expires_seconds,
+            self.document_lease_seconds,
+            self.generation_stale_seconds,
+            self.session_max_age_seconds,
+        ) <= 0:
             raise ValueError("Upload URL, document lease, and generation stale durations must be positive")
+        if bool(self.demo_access_code) != bool(self.demo_workspace_id):
+            raise ValueError("DEMO_ACCESS_CODE and DEMO_WORKSPACE_ID must be configured together")
+        if self.owner_workspace_id is not None and self.demo_workspace_id == self.owner_workspace_id:
+            raise ValueError("OWNER_WORKSPACE_ID and DEMO_WORKSPACE_ID must be different")
         if self.environment.casefold() == "production":
             required = {
-                "APP_ACCESS_CODE": self.app_access_code,
+                "OWNER_ACCESS_CODE (or APP_ACCESS_CODE)": self.effective_owner_access_code,
+                "OWNER_WORKSPACE_ID": self.owner_workspace_id,
+                "DEMO_ACCESS_CODE": self.demo_access_code,
+                "DEMO_WORKSPACE_ID": self.demo_workspace_id,
                 "SESSION_SIGNING_KEY": self.session_signing_key,
                 "CREDENTIAL_ENCRYPTION_KEY": self.credential_encryption_key,
                 "DATABASE_URL": self.database_url,
@@ -124,7 +142,7 @@ class Settings(BaseSettings):
                 raise ValueError("Production CORS_ORIGINS must not contain local development origins")
             if self.ai_mode != "live":
                 raise ValueError("Production AI_MODE must be live")
-            if self.app_access_code == "revia-local" or self.session_signing_key.startswith("revia-local"):
+            if self.effective_owner_access_code == "revia-local" or self.session_signing_key.startswith("revia-local"):
                 raise ValueError("Production access and signing secrets must be explicitly configured")
             if self.credential_encryption_key == "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=":
                 raise ValueError("Production CREDENTIAL_ENCRYPTION_KEY must be explicitly configured")
@@ -141,6 +159,10 @@ class Settings(BaseSettings):
             if s3_missing:
                 raise ValueError(f"Production S3 configuration is missing: {', '.join(s3_missing)}")
         return self
+
+    @property
+    def effective_owner_access_code(self) -> str:
+        return self.owner_access_code or self.app_access_code
 
 
 @lru_cache

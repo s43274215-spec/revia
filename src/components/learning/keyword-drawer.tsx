@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { BulletPoint, PointVersions, Version, VersionPoint, versionLabels } from "./data";
 import { Icon } from "./icons";
+import { toggleExpandedVersions } from "./drawer-state";
 
 export type DrawerState =
   | { mode: "keyword"; point: BulletPoint }
@@ -10,7 +11,7 @@ export type DrawerState =
 const toText = (items: string[]) => items.join("\n\n");
 const fromText = (value: string) => value.split(/\n\s*\n/).map((item) => item.trim()).filter(Boolean);
 
-export function OperationDrawer({ state, onClose, onSaveSingle, onSaveGlobal }: { state: DrawerState; onClose: () => void; onSaveSingle: (pointId: string, version: Version, value: VersionPoint) => void; onSaveGlobal: (pointId: string, versions: PointVersions) => void }) {
+export function OperationDrawer({ state, demoMode = false, onClose, onSaveSingle, onSaveGlobal }: { state: DrawerState; demoMode?: boolean; onClose: () => void; onSaveSingle: (pointId: string, version: Version, value: VersionPoint) => void; onSaveGlobal: (pointId: string, versions: PointVersions) => void }) {
   const initialVersion = state.mode === "keyword" ? "recitation" : state.version;
   const initialValue = state.point.versions[initialVersion];
   const [singleTitle, setSingleTitle] = useState(initialValue.title);
@@ -20,7 +21,8 @@ export function OperationDrawer({ state, onClose, onSaveSingle, onSaveGlobal }: 
     recitation: { title: state.point.versions.recitation.title, content: toText(state.point.versions.recitation.content) },
     keywords: { title: state.point.versions.keywords.title, content: toText(state.point.versions.keywords.content) },
   });
-  const [expanded, setExpanded] = useState<Version>(initialVersion);
+  const [expanded, setExpanded] = useState<Set<Version>>(() => new Set([initialVersion]));
+  const toggleExpanded = (version: Version) => setExpanded((current) => toggleExpandedVersions(current, version));
 
   const drawerTitle = state.mode === "keyword" ? "关键词回忆" : state.mode === "single" ? "单独编辑" : "整体编辑";
   const saveSingle = () => { if (state.mode === "single") onSaveSingle(state.point.id, state.version, { title: singleTitle.trim(), content: fromText(singleText) }); };
@@ -36,6 +38,7 @@ export function OperationDrawer({ state, onClose, onSaveSingle, onSaveGlobal }: 
       <aside className="keyword-drawer" role="dialog" aria-modal="true" aria-label={drawerTitle}>
         <div className="drawer-header"><div><span>{drawerTitle}</span><h2>{initialValue.title}</h2></div><button onClick={onClose} aria-label="关闭"><Icon name="close" /></button></div>
         <div className="drawer-body">
+          {demoMode && state.mode !== "keyword" && <p className="demo-edit-note">演示模式不会保存修改；本次编辑只在当前页面临时生效。</p>}
           {state.mode === "keyword" && <>
             <p className="drawer-context">对应背诵版内容</p><div className="drawer-rule" />
             {state.point.versions.recitation.content.map((text, index) => <p className="drawer-reading" key={index}>{text}</p>)}
@@ -46,15 +49,15 @@ export function OperationDrawer({ state, onClose, onSaveSingle, onSaveGlobal }: 
             <input className="edit-title-input" id="single-title" value={singleTitle} onChange={(event) => setSingleTitle(event.target.value)} />
             <label className="edit-label" htmlFor="single-edit">内容</label>
             <textarea id="single-edit" value={singleText} onChange={(event) => setSingleText(event.target.value)} />
-            <div className="drawer-actions"><button onClick={onClose}>取消</button><button className="primary" onClick={saveSingle}>保存修改</button></div>
+            <div className="drawer-actions"><button onClick={onClose}>取消</button><button className="primary" onClick={saveSingle}>{demoMode ? "临时应用" : "保存修改"}</button></div>
           </>}
           {state.mode === "global" && <>
             <p className="drawer-context">同一要点的三个版本</p><div className="drawer-rule" />
             <div className="accordion">
               {(["original", "recitation", "keywords"] as Version[]).map((version) => (
-                <section className={expanded === version ? "is-expanded" : ""} key={version}>
-                  <button className="accordion-trigger" onClick={() => setExpanded(version)} aria-expanded={expanded === version}><span>{versionLabels[version]}</span><i>⌄</i></button>
-                  {expanded === version && <div className="accordion-fields">
+                <section className={expanded.has(version) ? "is-expanded" : ""} key={version}>
+                  <button className="accordion-trigger" onClick={() => toggleExpanded(version)} aria-expanded={expanded.has(version)}><span>{versionLabels[version]}</span><i>⌄</i></button>
+                  {expanded.has(version) && <div className="accordion-fields">
                     <label className="edit-label" htmlFor={`${version}-title`}>标题</label>
                     <input className="edit-title-input" id={`${version}-title`} aria-label={`${versionLabels[version]}标题`} value={globalDraft[version].title} onChange={(event) => setGlobalDraft({ ...globalDraft, [version]: { ...globalDraft[version], title: event.target.value } })} />
                     <label className="edit-label" htmlFor={`${version}-content`}>内容</label>
@@ -63,7 +66,7 @@ export function OperationDrawer({ state, onClose, onSaveSingle, onSaveGlobal }: 
                 </section>
               ))}
             </div>
-            <div className="drawer-actions"><button onClick={onClose}>取消</button><button className="primary" onClick={saveGlobal}>保存全部</button></div>
+            <div className="drawer-actions"><button onClick={onClose}>取消</button><button className="primary" onClick={saveGlobal}>{demoMode ? "临时应用全部" : "保存全部"}</button></div>
           </>}
         </div>
       </aside>

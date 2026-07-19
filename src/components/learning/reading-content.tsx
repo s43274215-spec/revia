@@ -8,28 +8,29 @@ type ReadingContentProps = { project: Project; version: Version; query: string; 
 
 function Highlighted({ text, query }: { text: string; query: string }) {
   if (!query.trim()) return text;
-  const index = text.toLowerCase().indexOf(query.toLowerCase());
-  if (index < 0) return text;
-  return <>{text.slice(0, index)}<mark>{text.slice(index, index + query.length)}</mark>{text.slice(index + query.length)}</>;
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const parts = text.split(new RegExp(`(${escaped})`, "gi"));
+  return <>{parts.map((part, index) => part.toLocaleLowerCase("zh-CN") === query.toLocaleLowerCase("zh-CN") ? <mark key={index}>{part}</mark> : part)}</>;
 }
 
 function Lines({ lines, query }: { lines: string[]; query: string }) {
   return <>{lines.map((line, index) => <Fragment key={index}>{index > 0 && <br />}<Highlighted text={line} query={query} /></Fragment>)}</>;
 }
 
-export function renderContentBlocks(content: string[], query: string): ReactNode[] {
+export function renderContentBlocks(content: string[], query: string, idPrefix = "content", activeTargetId?: string): ReactNode[] {
   return classifyContentBlocks(content).map((block, blockIndex) => {
     if (block.kind === "ordered") {
-      return <ol className="content-list" key={blockIndex}>{block.items.map((item, index) => <li key={index}><Highlighted text={item} query={query} /></li>)}</ol>;
+      return <ol className="content-list" key={blockIndex}>{block.items.map((item, index) => { const id = `${idPrefix}-block-${blockIndex}-item-${index}`; return <li className={activeTargetId === id ? "is-search-target" : ""} id={id} key={index}><Highlighted text={item} query={query} /></li>; })}</ol>;
     }
     if (block.kind === "unordered") {
-      return <ul className="content-list" key={blockIndex}>{block.items.map((item, index) => <li key={index}><Highlighted text={item} query={query} /></li>)}</ul>;
+      return <ul className="content-list" key={blockIndex}>{block.items.map((item, index) => { const id = `${idPrefix}-block-${blockIndex}-item-${index}`; return <li className={activeTargetId === id ? "is-search-target" : ""} id={id} key={index}><Highlighted text={item} query={query} /></li>; })}</ul>;
     }
-    return <p key={blockIndex}><Lines lines={block.items} query={query} /></p>;
+    const id = `${idPrefix}-block-${blockIndex}`;
+    return <p className={activeTargetId === id ? "is-search-target" : ""} id={id} key={blockIndex}><Lines lines={block.items} query={query} /></p>;
   });
 }
 
-export function ReadingContent({ project, version, query, onKeyword, onPointContext, partialJob }: ReadingContentProps & { partialJob: GenerationJob | null }) {
+export function ReadingContent({ project, version, query, activeTargetId, onKeyword, onPointContext, partialJob }: ReadingContentProps & { activeTargetId?: string; partialJob: GenerationJob | null }) {
   const failureCounts = partialJob ? generationFailureCounts(partialJob.item_failures) : null;
   return (
     <article className="reading-document" data-project={project.id}>
@@ -44,23 +45,23 @@ export function ReadingContent({ project, version, query, onKeyword, onPointCont
       {project.chapters.map((chapter) => (
         <section className="chapter-section" id={chapter.id} key={chapter.id}>
           <div className="chapter-number">第 {chapter.number} 章</div>
-          <h2>{chapter.title}</h2>
+          <h2 id={`${chapter.id}-title`} className={activeTargetId === `${chapter.id}-title` ? "is-search-target" : ""}>{chapter.title}</h2>
           {chapter.points.map((knowledgePoint) => (
             <section className="knowledge-section" id={knowledgePoint.id} key={knowledgePoint.id}>
-              <h3>{knowledgePoint.title}</h3>
+              <h3 id={`${knowledgePoint.id}-title`} className={activeTargetId === `${knowledgePoint.id}-title` ? "is-search-target" : ""}>{knowledgePoint.title}</h3>
               <ol className={`bullet-point-list ${knowledgePoint.bulletPoints.length === 1 ? "is-single" : ""}`}>
                 {knowledgePoint.bulletPoints.map((point) => (
                   <li className="bullet-point" id={point.id} data-point-id={point.id} key={point.id} onContextMenu={(event) => onPointContext(event, point)}>
-                    <h4>{point.versions[version].title}</h4>
+                    <h4 id={`${point.id}-title`} className={activeTargetId === `${point.id}-title` ? "is-search-target" : ""}>{point.versions[version].title}</h4>
                     {version === "keywords" ? (
                       <div className="keyword-lines">
                         {point.versions.keywords.content.map((keyword, index) => (
-                          <button key={`${point.id}-${index}`} onClick={() => onKeyword(point)}>
+                          <button id={`${point.id}-${version}-item-${index}`} className={activeTargetId === `${point.id}-${version}-item-${index}` ? "is-search-target" : ""} key={`${point.id}-${index}`} onClick={() => onKeyword(point)}>
                             <span>{String(index + 1).padStart(2, "0")}</span><strong><Highlighted text={keyword} query={query} /></strong><em>查看背诵内容</em>
                           </button>
                         ))}
                       </div>
-                    ) : <div className="bullet-content">{renderContentBlocks(point.versions[version].content, query)}</div>}
+                    ) : <div className="bullet-content">{renderContentBlocks(point.versions[version].content, query, `${point.id}-${version}`, activeTargetId)}</div>}
                   </li>
                 ))}
               </ol>

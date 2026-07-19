@@ -3,13 +3,13 @@
 import { createContext, FormEvent, ReactNode, useContext, useEffect, useState } from "react";
 import {
   AUTH_REQUIRED_EVENT,
-  getWorkspaceToken,
+  clearWorkspaceToken,
   PUBLIC_ACCESS_CLOSED_EVENT,
-  saveWorkspaceToken,
 } from "@/lib/auth-token";
 import {
   createAnonymousWorkspace,
   getAccessMode,
+  logoutWorkspace,
   unlockWorkspace,
   validateWorkspaceSession,
   WorkspaceRole,
@@ -17,7 +17,7 @@ import {
 } from "@/lib/auth-api";
 
 type AuthState = "checking" | "locked" | "ready";
-type AuthContextValue = { role: WorkspaceRole };
+type AuthContextValue = { role: WorkspaceRole; logout: () => Promise<void> };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
@@ -56,11 +56,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (!active) return;
         setPublicAccess(mode.public_access_enabled);
         setOwnerLogin(!mode.public_access_enabled);
-        const token = getWorkspaceToken();
-        if (!token) {
-          updateState("locked");
-          return;
-        }
+        clearWorkspaceToken();
         const session = await validateWorkspaceSession();
         if (!active) return;
         setRole(session.role);
@@ -84,9 +80,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const rememberSession = (session: WorkspaceSession) => {
-    saveWorkspaceToken(session.token);
     setRole(session.role);
     setState("ready");
+  };
+
+  const logout = async () => {
+    try {
+      await logoutWorkspace();
+    } finally {
+      clearWorkspaceToken();
+      setRole("public");
+      setAccessCode("");
+      setError(null);
+      setState("locked");
+    }
   };
 
   const ownerUnlock = async (event: FormEvent<HTMLFormElement>) => {
@@ -129,12 +136,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         <section className="access-card" aria-labelledby="access-title">
           <div className="access-brand"><span>R</span>Revia</div>
           <div className="access-rule"><i /></div>
-          <p className="access-eyebrow">{showOwnerForm ? "站长工作区" : "匿名工作区"}</p>
-          <h1 id="access-title">{showOwnerForm ? "站长登录" : "进入你的学习空间"}</h1>
+          <p className="access-eyebrow">{showOwnerForm ? "固定工作区" : "匿名工作区"}</p>
+          <h1 id="access-title">{showOwnerForm ? "输入访问码" : "进入你的学习空间"}</h1>
           {showOwnerForm ? (
             <form onSubmit={ownerUnlock}>
               <p className="access-copy">
-                {publicAccess ? "输入站长访问码，进入固定的 Owner Workspace。" : "Revia 当前暂未开放，站长仍可登录管理和使用。"}
+                {publicAccess ? "输入站长或演示访问码，进入对应的固定 Workspace。" : "Revia 当前暂未开放；站长与演示访问仍可使用。"}
               </p>
               <label htmlFor="app-access-code">访问码</label>
               <input
@@ -144,12 +151,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 autoComplete="current-password"
                 autoFocus
                 maxLength={256}
-                placeholder="请输入站长访问码"
+                placeholder="请输入访问码"
                 onChange={(event) => setAccessCode(event.target.value)}
               />
               {error && <p className="access-error" role="alert">{error}</p>}
               <button type="submit" disabled={!accessCode.trim() || busy}>
-                {busy ? "正在验证…" : "进入 Owner Workspace"}
+                {busy ? "正在验证…" : "进入 Workspace"}
               </button>
             </form>
           ) : (
@@ -166,11 +173,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               {showOwnerForm ? "返回公开入口" : "站长入口"}
             </button>
           )}
-          <p className="access-note">工作区凭证仅保存在此浏览器中。</p>
+          <p className="access-note">会话由服务端安全验证，不依赖浏览器本地 Workspace 标识。</p>
         </section>
       </main>
     );
   }
 
-  return <AuthContext.Provider value={{ role }}>{children}</AuthContext.Provider>;
+  return (
+    <AuthContext.Provider value={{ role, logout }}>
+      {role === "demo" && (
+        <div className="demo-session-banner" role="status">
+          <span>演示模式 · 修改不会保存</span>
+          <button type="button" onClick={() => void logout()}>退出</button>
+        </div>
+      )}
+      {children}
+    </AuthContext.Provider>
+  );
 }

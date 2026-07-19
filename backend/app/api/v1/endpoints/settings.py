@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.auth.dependencies import OwnerWorkspace, WorkspaceId
+from app.auth.dependencies import OwnerWorkspace, WritableWorkspaceId
 from app.core.config import Settings, get_settings
 from app.db.session import get_db
 from app.settings.schemas import (
@@ -24,7 +24,7 @@ router = APIRouter()
 
 
 def get_deepseek_settings_service(
-    workspace_id: WorkspaceId,
+    workspace_id: WritableWorkspaceId,
     db: Annotated[Session, Depends(get_db)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> DeepSeekSettingsService:

@@ -18,6 +18,7 @@ from app.document.parser import (
     PDFParsingError,
     ParsedPDF,
     ParsedPageData,
+    SourceOutlineEntry,
 )
 from app.core.document_memory_diagnostics import DocumentMemoryDiagnostics, release_process_memory
 from app.document.splitter import StructuredTextSplitter
@@ -363,6 +364,7 @@ class DocumentProcessingService:
                 return document
             raise LeaseUnavailableError("文档正在由其他进程处理")
         local_path: Path | None = None
+        source_outline: tuple[SourceOutlineEntry, ...] = ()
         diagnostics = DocumentMemoryDiagnostics(
             self._db,
             enabled=self._memory_diagnostics_enabled,
@@ -384,6 +386,7 @@ class DocumentProcessingService:
                 raise PDFParsingError("上传的文件不是有效 PDF") from exc
             try:
                 total_pages = self._parser.validate_document(pdf)
+                source_outline = self._parser.extract_outline(pdf)
                 retry_window_page = (
                     document.current_page
                     if document.processing_phase == "resource_limited"
@@ -486,7 +489,7 @@ class DocumentProcessingService:
             finally:
                 if pdf is not None:
                     pdf.close()
-            return self._finalize_document(document_id, lease_owner)
+            return self._finalize_document(document_id, lease_owner, source_outline)
         except LeaseUnavailableError:
             raise
         except Exception as exc:
@@ -652,7 +655,12 @@ class DocumentProcessingService:
                 self._db.commit()
             raise DocumentProcessingError(str(exc)) from exc
 
-    def _finalize_document(self, document_id: uuid.UUID, owner: str) -> Document:
+    def _finalize_document(
+        self,
+        document_id: uuid.UUID,
+        owner: str,
+        source_outline: tuple[SourceOutlineEntry, ...] = (),
+    ) -> Document:
         document = self._db.get(Document, document_id)
         if document is None:
             raise DocumentNotFoundError("文档不存在")
@@ -679,6 +687,7 @@ class DocumentProcessingService:
             ocr_executed=document.ocr_page_count > 0,
             ocr_page_count=document.ocr_page_count,
             ocr_error=None,
+            outline=source_outline,
         )
         structured = self._structurer.structure(parsed_pdf)
         chunks = self._splitter.split(structured)
