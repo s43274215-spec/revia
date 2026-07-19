@@ -26,7 +26,7 @@ from app.matching.service import MatchingService
 from app.models.content import BulletPoint, BulletPointSource, Chapter, ContentVersion, KnowledgePoint
 from app.models.document import DocumentPage, ParsedPage, TextChunk
 from app.models.enums import GenerationItemStatus, GenerationStatus
-from app.models.project import GenerationJob, GenerationJobItem, Project
+from app.models.project import GenerationJob, GenerationJobItem, Project, Syllabus
 from app.services.generation import GenerationWorkflowService
 from app.services.knowledge_hierarchy import GeneratedRecord, organize_generated_records
 from app.models.workspace import Workspace
@@ -584,6 +584,47 @@ class GenerationReliabilityTests(unittest.TestCase):
             last_activity_at=now,
         )
 
+    def test_prepare_persists_all_item_checkpoints_before_worker_runs(self) -> None:
+        with self.Session() as session:
+            session.add(Syllabus(
+                project_id=self.project_id,
+                text="第一章 基础\n1. X-Y 理论\n2. 双因素理论",
+            ))
+            session.commit()
+            prepared = self._service(session).prepare(self.project_id, regenerate=True)
+            items = list(session.scalars(
+                select(GenerationJobItem)
+                .where(GenerationJobItem.job_id == prepared.job.id)
+                .order_by(GenerationJobItem.position)
+            ).all())
+
+        self.assertTrue(prepared.should_process)
+        self.assertEqual(prepared.job.total_items, 2)
+        self.assertEqual([item.syllabus_item for item in items], ["X-Y 理论", "双因素理论"])
+        self.assertTrue(all(item.status == GenerationItemStatus.PENDING.value for item in items))
+
+    def test_latest_published_job_ignores_newer_empty_failed_job(self) -> None:
+        published = self._active_job(total_items=48, processed_items=48)
+        published.status = GenerationStatus.PARTIAL_FAILED
+        published.completed_at = datetime.now(UTC) - timedelta(minutes=5)
+        published.item_failures = [{
+            "syllabus_item": "X-Y 理论",
+            "reason": "unmatched",
+            "failure_type": "unmatched",
+        }]
+        failed = self._active_job(total_items=48, processed_items=0)
+        failed.status = GenerationStatus.FAILED
+        failed.completed_at = datetime.now(UTC)
+        failed.item_failures = []
+        with self.Session() as session:
+            session.add_all([published, failed])
+            session.commit()
+            latest = self._service(session).get_latest_published_job(self.project_id)
+
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest.id, published.id)
+        self.assertEqual(latest.status, GenerationStatus.PARTIAL_FAILED)
+
     def test_two_regenerate_preparations_reuse_one_active_job(self) -> None:
         active = self._active_job(total_items=48, processed_items=10)
         with self.Session() as session:
@@ -844,6 +885,56 @@ class GenerationPipelineAPITests(unittest.TestCase):
         self.assertEqual(second.json()["id"], str(active.id))
         with self.Session() as session:
             self.assertEqual(session.scalar(select(func.count(GenerationJob.id))), 1)
+
+    def test_latest_published_endpoint_ignores_newer_empty_failed_job(self) -> None:
+        now = datetime.now(UTC)
+        published = GenerationJob(
+            id=uuid.uuid4(),
+            project_id=self.project_id,
+            status=GenerationStatus.PARTIAL_FAILED,
+            provider="mock",
+            progress=100,
+            processed_items=3,
+            total_items=3,
+            item_failures=[{
+                "syllabus_item": "X-Y 理论",
+                "reason": "unmatched",
+                "failure_type": "unmatched",
+            }],
+            status_history=["pending", "partial_failed"],
+            successful_items=2,
+            failed_items=1,
+            started_at=now - timedelta(minutes=5),
+            completed_at=now - timedelta(minutes=4),
+            last_activity_at=now - timedelta(minutes=4),
+        )
+        empty_failed = GenerationJob(
+            id=uuid.uuid4(),
+            project_id=self.project_id,
+            status=GenerationStatus.FAILED,
+            provider="mock",
+            progress=100,
+            processed_items=0,
+            total_items=3,
+            item_failures=[],
+            status_history=["pending", "failed"],
+            successful_items=0,
+            failed_items=0,
+            started_at=now - timedelta(minutes=1),
+            completed_at=now,
+            last_activity_at=now,
+        )
+        with self.Session() as session:
+            session.add_all([published, empty_failed])
+            session.commit()
+
+        response = self.client.get(
+            f"/api/v1/projects/{self.project_id}/generation-jobs/latest-published"
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["id"], str(published.id))
+        self.assertEqual(response.json()["status"], "partial_failed")
 
     def test_live_generation_endpoint_rejects_missing_key_without_mock_fallback(self) -> None:
         app.dependency_overrides[get_settings] = lambda: Settings(

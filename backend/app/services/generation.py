@@ -121,6 +121,8 @@ class GenerationWorkflowService:
             self._db.refresh(existing)
             return PreparedGeneration(job=existing, should_process=False)
 
+        syllabus_text = project.syllabus.text if project.syllabus and project.syllabus.text else ""
+        syllabus_items = self._syllabus_parser.flatten_hierarchy(syllabus_text)
         now = datetime.now(UTC)
         job = GenerationJob(
             project_id=project.id,
@@ -128,7 +130,7 @@ class GenerationWorkflowService:
             provider=self._provider_name,
             progress=0,
             processed_items=0,
-            total_items=0,
+            total_items=len(syllabus_items),
             item_failures=[],
             status_history=[GenerationStatus.PENDING.value],
             successful_items=0,
@@ -138,6 +140,18 @@ class GenerationWorkflowService:
         )
         project.status = ProjectStatus.PROCESSING
         self._db.add(job)
+        self._db.flush()
+        self._db.add_all([
+            GenerationJobItem(
+                job_id=job.id,
+                position=index,
+                syllabus_chapter=entry.chapter,
+                syllabus_item=entry.title,
+                parent_syllabus_item=entry.parent_title,
+                status=GenerationItemStatus.PENDING.value,
+            )
+            for index, entry in enumerate(syllabus_items)
+        ])
         self._db.commit()
         self._db.refresh(job)
         return PreparedGeneration(job=job, should_process=True)
@@ -152,25 +166,18 @@ class GenerationWorkflowService:
         if self._ai_service is None or self._matching is None:
             raise RuntimeError("Generation processing requires an initialized AI and matching service")
 
+        cancelled = False
         try:
             if job.status in _TERMINAL_JOB_STATUSES:
                 return job
-            self._set_status(job, GenerationStatus.PARSING, progress=5)
+            self._set_status(job, GenerationStatus.PARSING, progress=max(5, job.progress or 0))
             syllabus_text = project.syllabus.text if project.syllabus and project.syllabus.text else ""
             syllabus_items = self._syllabus_parser.flatten_hierarchy(syllabus_text)
-            job.total_items = len(syllabus_items)
-            job.last_activity_at = datetime.now(UTC)
-            self._db.commit()
             if not syllabus_items:
                 return self._fail(job, project, "No usable syllabus items were found")
 
-            chunks = self._project_chunks(project.id)
-            self._set_status(job, GenerationStatus.MATCHING, progress=15)
-            plans = self._matching.plan_items(syllabus_items)
-            matches = [self._matching.match_plan(plan=plan, chunks=chunks) for plan in plans]
-            plans, matches = await self._apply_query_rewrite_fallbacks(plans, matches, chunks)
-            matches = self._matching.resolve_dependent_matches(plans, matches)
-            if not self._job_items(job.id):
+            items = self._job_items(job.id)
+            if not items:
                 self._db.add_all([
                     GenerationJobItem(
                         job_id=job.id,
@@ -182,29 +189,78 @@ class GenerationWorkflowService:
                     )
                     for index, entry in enumerate(syllabus_items)
                 ])
+                job.total_items = len(syllabus_items)
+                job.last_activity_at = datetime.now(UTC)
+                self._db.commit()
+                items = self._job_items(job.id)
+            elif len(items) != len(syllabus_items):
+                return self._fail(
+                    job,
+                    project,
+                    "generation_checkpoint_mismatch: persisted syllabus checkpoints no longer match the current syllabus",
+                )
+            else:
+                job.total_items = len(items)
+                job.last_activity_at = datetime.now(UTC)
                 self._db.commit()
 
-            for index, match in enumerate(matches, start=1):
+            chunks = self._project_chunks(project.id)
+            needs_matching = any(
+                item.status not in _TERMINAL_ITEM_STATUSES and not item.candidates_payload
+                for item in items
+            )
+            if needs_matching:
+                self._set_status(job, GenerationStatus.MATCHING, progress=max(10, min(job.progress or 0, 35)))
+                plans, matches = await asyncio.to_thread(self._plan_and_match, syllabus_items, chunks)
+                plans, matches = await self._apply_query_rewrite_fallbacks(plans, matches, chunks, job=job)
+                matches = await asyncio.to_thread(self._matching.resolve_dependent_matches, plans, matches)
+
+                for index, match in enumerate(matches):
+                    self._db.refresh(job)
+                    if job.status in _TERMINAL_JOB_STATUSES:
+                        return job
+                    item = self._job_item(job.id, index)
+                    if item is None:
+                        raise RuntimeError(f"generation checkpoint {index} is missing")
+                    if item.status in _TERMINAL_ITEM_STATUSES or item.candidates_payload:
+                        continue
+                    if not match.matched:
+                        self._complete_item_failure(
+                            item,
+                            failure_type="unmatched",
+                            reason=self._matching.failure_diagnostic(match),
+                        )
+                        self._record_progress(job)
+                        continue
+                    evidence = await asyncio.to_thread(
+                        self._matching.select_generation_evidence,
+                        match=match,
+                        chunks=chunks,
+                    )
+                    item.candidates_payload = [candidate.model_dump(mode="json") for candidate in evidence]
+                    item.error_message = None
+                    item.failure_type = None
+                    job.progress = max(15, min(35, 15 + int(20 * (index + 1) / max(job.total_items, 1))))
+                    job.last_activity_at = datetime.now(UTC)
+                    self._db.commit()
+
+            for item in self._job_items(job.id):
                 self._db.refresh(job)
                 if job.status in _TERMINAL_JOB_STATUSES:
                     return job
-                item = self._job_item(job.id, index - 1)
-                if item is None:
-                    raise RuntimeError(f"generation checkpoint {index - 1} is missing")
                 if item.status in _TERMINAL_ITEM_STATUSES:
                     continue
-                if not match.matched:
+                if not item.candidates_payload:
                     self._complete_item_failure(
                         item,
-                        failure_type="unmatched",
-                        reason=self._matching.failure_diagnostic(match),
+                        failure_type="generation_error",
+                        reason="generation checkpoint has no matched evidence",
                     )
                     self._record_progress(job)
                     continue
-                evidence = self._matching.select_generation_evidence(match=match, chunks=chunks)
+                evidence = [CandidateChunk.model_validate(candidate) for candidate in item.candidates_payload]
                 item.status = GenerationItemStatus.PROCESSING.value
                 item.started_at = item.started_at or datetime.now(UTC)
-                item.candidates_payload = [candidate.model_dump(mode="json") for candidate in evidence]
                 self._set_status(job, GenerationStatus.GENERATING, commit=False)
                 self._db.commit()
                 try:
@@ -213,8 +269,8 @@ class GenerationWorkflowService:
                             project_id=project.id,
                             project_name=project.name,
                             project_description=project.description,
-                            syllabus_chapter=match.chapter,
-                            syllabus_item=match.syllabus_item,
+                            syllabus_chapter=item.syllabus_chapter,
+                            syllabus_item=item.syllabus_item,
                             candidates=evidence,
                         ),
                         before_validation=lambda: self._set_status(job, GenerationStatus.VALIDATING),
@@ -240,14 +296,8 @@ class GenerationWorkflowService:
 
             return self._finalize_from_checkpoints(job, project)
         except asyncio.CancelledError:
+            cancelled = True
             self._db.rollback()
-            interrupted_job = self._db.get(GenerationJob, job.id) or job
-            interrupted_project = self._db.get(Project, project.id) or project
-            self._fail(
-                interrupted_job,
-                interrupted_project,
-                "stale_interrupted_generation: generation worker was cancelled before finalization",
-            )
             raise
         except Exception as exc:
             self._db.rollback()
@@ -255,13 +305,27 @@ class GenerationWorkflowService:
             failed_project = self._db.get(Project, project.id) or project
             return self._fail(failed_job, failed_project, f"generation_failed: {self._safe_error(exc)}")
         finally:
-            self._ensure_terminal_after_worker(job_id, project_id)
+            if not cancelled:
+                self._ensure_terminal_after_worker(job_id, project_id)
+
+    def _plan_and_match(
+        self,
+        syllabus_items: list,
+        chunks: list[TextChunk],
+    ) -> tuple[list[QueryPlan], list[ItemMatch]]:
+        if self._matching is None:
+            raise RuntimeError("Matching service is not initialized")
+        plans = self._matching.plan_items(syllabus_items)
+        matches = [self._matching.match_plan(plan=plan, chunks=chunks) for plan in plans]
+        return plans, matches
 
     async def _apply_query_rewrite_fallbacks(
         self,
         plans: list[QueryPlan],
         matches: list[ItemMatch],
         chunks: list[TextChunk],
+        *,
+        job: GenerationJob | None = None,
     ) -> tuple[list[QueryPlan], list[ItemMatch]]:
         if self._ai_service is None or self._matching is None:
             return plans, matches
@@ -283,7 +347,15 @@ class GenerationWorkflowService:
                 except Exception:
                     rewrite_cache[cache_key] = []
             plans[index] = plan.with_ai_queries(rewrite_cache[cache_key])
-            matches[index] = self._matching.match_plan(plan=plans[index], chunks=chunks)
+            matches[index] = await asyncio.to_thread(
+                self._matching.match_plan,
+                plan=plans[index],
+                chunks=chunks,
+            )
+            if job is not None:
+                job.progress = max(job.progress or 0, min(30, 15 + int(15 * (index + 1) / max(len(plans), 1))))
+                job.last_activity_at = datetime.now(UTC)
+                self._db.commit()
         return plans, matches
 
     def get_job(self, project_id: uuid.UUID, job_id: uuid.UUID) -> GenerationJob | None:
@@ -322,6 +394,20 @@ class GenerationWorkflowService:
         if latest is not None:
             self._db.refresh(latest)
         return latest
+
+    def get_latest_published_job(self, project_id: uuid.UUID) -> GenerationJob | None:
+        project = self._project(project_id)
+        if project is None:
+            return None
+        return self._db.scalar(
+            select(GenerationJob)
+            .where(
+                GenerationJob.project_id == project_id,
+                GenerationJob.status.in_((GenerationStatus.COMPLETED, GenerationStatus.PARTIAL_FAILED)),
+            )
+            .order_by(GenerationJob.completed_at.desc(), GenerationJob.created_at.desc())
+            .limit(1)
+        )
 
     def _project(self, project_id: uuid.UUID, *, lock: bool = False) -> Project | None:
         statement = select(Project).where(
