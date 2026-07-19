@@ -10,6 +10,7 @@ from app.document.parser import PDFParser, ParsedPDF, ParsedPageData, SourceOutl
 from app.document.splitter import StructuredTextSplitter
 from app.document.structure import TextStructurer
 from app.services.generation import GenerationWorkflowService
+from app.services.content_organization import INTERNAL_UNRESOLVED_CHAPTER
 
 
 def parsed_pdf(text: str, outline=()) -> ParsedPDF:
@@ -43,6 +44,7 @@ def candidate(chapter, page, score=0.8):
         page_start=page,
         page_end=page,
         score=score,
+        text=f"{chapter}\n这是用于确认章节标题之后确实存在足够具体主题正文的测试内容。" if chapter else "正文内容",
     )
 
 
@@ -89,12 +91,12 @@ class SourceChapterTests(unittest.TestCase):
         )
         self.assertEqual(GenerationWorkflowService._source_chapter(value), "资料第一章")
 
-    def test_page_range_and_unclassified_fallbacks_never_use_syllabus_heading(self) -> None:
+    def test_unresolved_chapters_use_an_internal_hidden_container(self) -> None:
         unknown = candidate(None, 42)
         value = record([unknown], [unknown.chunk_id], syllabus_chapter="不能作为资料章节")
-        self.assertEqual(GenerationWorkflowService._source_chapter(value), "资料 · 第 42–42 页")
+        self.assertEqual(GenerationWorkflowService._source_chapter(value), INTERNAL_UNRESOLVED_CHAPTER)
         empty = record([], [], syllabus_chapter="也不能使用")
-        self.assertEqual(GenerationWorkflowService._source_chapter(empty), "未归类内容")
+        self.assertEqual(GenerationWorkflowService._source_chapter(empty), INTERNAL_UNRESOLVED_CHAPTER)
 
     def test_source_chapter_is_distinct_from_syllabus_parent_title(self) -> None:
         source = candidate("PDF 自身章节", 8)

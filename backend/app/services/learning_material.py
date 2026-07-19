@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.models.project import Project
 from app.schemas.content import LearningMaterialRead
+from app.services.content_organization import canonical_learning_material
 
 
 class LearningMaterialNotFoundError(LookupError):
@@ -22,4 +23,4 @@ class LearningMaterialService:
         ))
         if project is None:
             raise LearningMaterialNotFoundError(f"Project {project_id} was not found")
-        return LearningMaterialRead(project_id=project.id, chapters=project.chapters)
+        return canonical_learning_material(project.id, project.chapters)

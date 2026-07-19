@@ -33,17 +33,20 @@ export function searchProject(
     }
   };
   for (const chapter of project.chapters) {
-    add({ id: `chapter:${chapter.id}`, targetId: `${chapter.id}-title`, chapter: chapter.title, knowledgePoint: "", kind: "资料章节" }, chapter.title);
+    if (chapter.title) {
+      add({ id: `chapter:${chapter.id}`, targetId: `${chapter.id}-title`, chapter: chapter.title, knowledgePoint: "", kind: "资料章节" }, chapter.title);
+    }
+    const chapterTitle = chapter.title ?? "";
     for (const knowledge of chapter.points) {
-      add({ id: `knowledge:${knowledge.id}`, targetId: `${knowledge.id}-title`, chapter: chapter.title, knowledgePoint: knowledge.title, kind: "知识点" }, knowledge.title);
+      add({ id: `knowledge:${knowledge.id}`, targetId: `${knowledge.id}-title`, chapter: chapterTitle, knowledgePoint: knowledge.title, kind: "知识点" }, knowledge.title);
       for (const point of knowledge.bulletPoints) {
         const versionPoint = point.versions[version];
-        add({ id: `title:${point.id}`, targetId: `${point.id}-title`, chapter: chapter.title, knowledgePoint: knowledge.title, kind: "内部标题" }, versionPoint.title);
+        add({ id: `title:${point.id}`, targetId: `${point.id}-title`, chapter: chapterTitle, knowledgePoint: knowledge.title, kind: "内部标题" }, versionPoint.title);
         if (version === "keywords") {
           versionPoint.content.forEach((text, index) => add({
             id: `body:${point.id}:${version}:${index}`,
             targetId: `${point.id}-${version}-item-${index}`,
-            chapter: chapter.title,
+            chapter: chapterTitle,
             knowledgePoint: knowledge.title,
             kind: "正文",
           }, text));
@@ -55,7 +58,7 @@ export function searchProject(
             add({
               id: `body:${point.id}:${version}:${blockIndex}`,
               targetId: `${point.id}-${version}-block-${blockIndex}`,
-              chapter: chapter.title,
+              chapter: chapterTitle,
               knowledgePoint: knowledge.title,
               kind: "正文",
             }, text);
@@ -63,7 +66,7 @@ export function searchProject(
             block.items.forEach((text, itemIndex) => add({
               id: `list:${point.id}:${version}:${blockIndex}:${itemIndex}`,
               targetId: `${point.id}-${version}-block-${blockIndex}-item-${itemIndex}`,
-              chapter: chapter.title,
+              chapter: chapterTitle,
               knowledgePoint: knowledge.title,
               kind: "列表项",
             }, text));

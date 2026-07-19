@@ -44,8 +44,10 @@ export function ReadingContent({ project, version, query, activeTargetId, onKeyw
       </aside>}
       {project.chapters.map((chapter) => (
         <section className="chapter-section" id={chapter.id} key={chapter.id}>
-          <div className="chapter-number">第 {chapter.number} 章</div>
-          <h2 id={`${chapter.id}-title`} className={activeTargetId === `${chapter.id}-title` ? "is-search-target" : ""}>{chapter.title}</h2>
+          {chapter.title && <>
+            <div className="chapter-number">第 {chapter.number} 章</div>
+            <h2 id={`${chapter.id}-title`} className={activeTargetId === `${chapter.id}-title` ? "is-search-target" : ""}>{chapter.title}</h2>
+          </>}
           {chapter.points.map((knowledgePoint) => (
             <section className="knowledge-section" id={knowledgePoint.id} key={knowledgePoint.id}>
               <h3 id={`${knowledgePoint.id}-title`} className={activeTargetId === `${knowledgePoint.id}-title` ? "is-search-target" : ""}>{knowledgePoint.title}</h3>

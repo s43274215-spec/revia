@@ -444,6 +444,72 @@ class KnowledgeHierarchyTests(unittest.TestCase):
         self.assertEqual(len(organized), 1)
         self.assertEqual([bullet.title for bullet in organized[0].result.bullet_points], ["定义", "作用"])
 
+    def test_cross_level_collision_keeps_five_complete_items_and_other_parent_bullets(self) -> None:
+        shared = uuid.uuid4()
+        broad = GeneratedRecord(
+            "第一章 人力资源", "人力资源基础概念", None,
+            self._result("人力资源基础概念", [("人力资源的特征", shared), ("人力资源的含义", shared)]),
+            [self._candidate(shared, "人力资源基础概念")],
+        )
+        complete = GeneratedRecord(
+            "第一章 人力资源", "人力资源的特征", None,
+            self._result("人力资源的特征", [
+                (title, shared) for title in ("能动性", "可再生性", "增值性", "时效性", "社会性")
+            ]),
+            [self._candidate(shared, "人力资源的特征")],
+        )
+
+        organized = organize_generated_records([broad, complete])
+
+        self.assertEqual(len(organized), 2)
+        by_title = {record.result.knowledge_point_title: record for record in organized}
+        self.assertEqual([bullet.title for bullet in by_title["人力资源基础概念"].result.bullet_points], ["人力资源的含义"])
+        self.assertEqual(
+            [bullet.title for bullet in by_title["人力资源的特征"].result.bullet_points],
+            ["能动性", "可再生性", "增值性", "时效性", "社会性"],
+        )
+
+    def test_cross_level_dedup_is_scoped_to_the_same_syllabus_chapter(self) -> None:
+        shared = uuid.uuid4()
+        first = GeneratedRecord("第一章", "宽泛概念", None, self._result("宽泛概念", [("共同标题", shared)]), [self._candidate(shared, "第一章")])
+        second = GeneratedRecord("第二章", "共同标题", None, self._result("共同标题", [("具体内容", shared)]), [self._candidate(shared, "第二章")])
+        organized = organize_generated_records([first, second])
+        self.assertEqual(len(organized), 2)
+        self.assertEqual(organized[0].result.bullet_points[0].title, "共同标题")
+
+    def test_more_complete_cross_level_bullet_merges_three_versions_before_save(self) -> None:
+        chunk = uuid.uuid4()
+        broad_result = self._result("宽泛知识点", [("目标知识点", chunk), ("其他内容", chunk)])
+        incoming = broad_result.bullet_points[0]
+        incoming = incoming.model_copy(update={
+            "original": incoming.original.model_copy(update={"content": "共享正文\n\n更完整的原文补充内容。"}),
+            "recitation": incoming.recitation.model_copy(update={"content": "共享背诵\n\n更完整的背诵补充内容。"}),
+            "keywords": incoming.keywords.model_copy(update={"content": "共享、关键词、记忆、完整补充"}),
+        })
+        broad_result = broad_result.model_copy(update={"bullet_points": [incoming, broad_result.bullet_points[1]]})
+        target_result = self._result("目标知识点", [("简述", chunk)])
+        target_bullet = target_result.bullet_points[0]
+        target_bullet = target_bullet.model_copy(update={
+            "original": target_bullet.original.model_copy(update={"content": "共享正文"}),
+            "recitation": target_bullet.recitation.model_copy(update={"content": "共享背诵"}),
+            "keywords": target_bullet.keywords.model_copy(update={"content": "共享、关键词、记忆"}),
+        })
+        target_result = target_result.model_copy(update={"bullet_points": [target_bullet]})
+        records = [
+            GeneratedRecord("第一章", "宽泛知识点", None, broad_result, [self._candidate(chunk, "宽泛")]),
+            GeneratedRecord("第一章", "目标知识点", None, target_result, [self._candidate(chunk, "目标")]),
+        ]
+
+        organized = organize_generated_records(records)
+
+        by_title = {record.result.knowledge_point_title: record for record in organized}
+        merged = by_title["目标知识点"].result.bullet_points[0]
+        self.assertEqual(merged.original.content.count("共享正文"), 1)
+        self.assertIn("更完整的原文补充内容", merged.original.content)
+        self.assertIn("更完整的背诵补充内容", merged.recitation.content)
+        self.assertIn("完整补充", merged.keywords.content)
+        self.assertEqual([bullet.title for bullet in by_title["宽泛知识点"].result.bullet_points], ["其他内容"])
+
 
 class GenerationReliabilityTests(unittest.TestCase):
     def setUp(self) -> None:

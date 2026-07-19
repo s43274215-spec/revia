@@ -221,6 +221,40 @@ class WordExportTests(unittest.TestCase):
         self.assertNotIn("未归类内容", text)
         self.assertNotIn("第 16–114 页", text)
 
+    def test_cross_level_duplicate_is_removed_from_word_without_losing_complete_point(self) -> None:
+        with self.Session() as db:
+            project = db.get(Project, self.project_id)
+            chapter = project.chapters[0]
+            broad = KnowledgePoint(title="人力资源基础概念", position=1)
+            complete = KnowledgePoint(title="人力资源的特征", position=2)
+
+            def add_bullet(owner, title, content, position):
+                item = BulletPoint(position=position)
+                item.versions = [
+                    ContentVersion(kind=ContentVersionKind.ORIGINAL, title=title, content=content),
+                    ContentVersion(kind=ContentVersionKind.RECITATION, title=title, content=f"{content}背诵"),
+                    ContentVersion(kind=ContentVersionKind.KEYWORDS, title=title, content=f"{title}、定义、要点"),
+                ]
+                owner.bullet_points.append(item)
+
+            add_bullet(broad, "人力资源的特征", "只覆盖能动性、可再生性。", 0)
+            add_bullet(broad, "人力资源的含义", "宽泛知识点的其他内容。", 1)
+            for index, title in enumerate(("能动性", "可再生性", "增值性", "时效性", "社会性")):
+                add_bullet(complete, title, f"{title}完整正文。", index)
+            chapter.knowledge_points.extend((broad, complete))
+            db.commit()
+            payload, _ = WordExportService(db).export(
+                self.workspace_id, self.project_id, ContentVersionKind.ORIGINAL,
+            )
+            self.assertEqual(len(broad.bullet_points), 2, "read-time canonicalization must not mutate ORM data")
+
+        _, text = self._text(payload)
+        self.assertEqual(text.count("人力资源的特征"), 1)
+        self.assertNotIn("只覆盖能动性、可再生性。", text)
+        for title in ("能动性", "可再生性", "增值性", "时效性", "社会性"):
+            self.assertIn(f"{title}完整正文。", text)
+        self.assertIn("宽泛知识点的其他内容。", text)
+
     def test_export_is_workspace_scoped(self) -> None:
         with self.Session() as db:
             with self.assertRaises(WordExportNotFoundError):

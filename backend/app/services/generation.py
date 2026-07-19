@@ -20,6 +20,7 @@ from app.models.document import ParsedDocument, TextChunk
 from app.models.enums import ContentVersionKind, DocumentKind, GenerationItemStatus, GenerationStatus, ProjectStatus
 from app.models.project import Document, GenerationJob, GenerationJobItem, Project
 from app.services.knowledge_hierarchy import GeneratedRecord, organize_generated_records
+from app.services.content_organization import INTERNAL_UNRESOLVED_CHAPTER, resolve_source_chapter_title
 from app.syllabus.parser import SyllabusParser
 
 
@@ -652,38 +653,12 @@ class GenerationWorkflowService:
 
     @staticmethod
     def _source_chapter(record: GeneratedRecord, source_title: str = "资料") -> str:
-        candidate_map = {candidate.chunk_id: candidate for candidate in record.candidates}
         cited_ids = [
             source_id
             for bullet in record.result.bullet_points
             for source_id in bullet.source_chunk_ids
         ]
-        chapter_scores: dict[str, tuple[int, float, int]] = {}
-        for source_id in cited_ids:
-            candidate = candidate_map.get(source_id)
-            if candidate is None or not candidate.chapter:
-                continue
-            count, score, first_page = chapter_scores.get(candidate.chapter, (0, 0.0, candidate.page_start))
-            chapter_scores[candidate.chapter] = (
-                count + 1,
-                max(score, candidate.score),
-                min(first_page, candidate.page_start),
-            )
-        if chapter_scores:
-            return max(
-                chapter_scores,
-                key=lambda title: (
-                    chapter_scores[title][0],
-                    chapter_scores[title][1],
-                    -chapter_scores[title][2],
-                ),
-            )
-        cited_candidates = [candidate_map[source_id] for source_id in cited_ids if source_id in candidate_map]
-        if cited_candidates:
-            page_start = min(candidate.page_start for candidate in cited_candidates)
-            page_end = max(candidate.page_end for candidate in cited_candidates)
-            return f"{source_title} · 第 {page_start}–{page_end} 页"
-        return "未归类内容"
+        return resolve_source_chapter_title(record.candidates, cited_ids) or INTERNAL_UNRESOLVED_CHAPTER
 
     @staticmethod
     def _source_link(candidate: CandidateChunk, cited_pages: list[int]) -> BulletPointSource:

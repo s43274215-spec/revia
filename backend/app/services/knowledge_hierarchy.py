@@ -3,6 +3,14 @@ from dataclasses import dataclass
 
 from app.ai.schemas import GeneratedBulletPayload, GeneratedItemResult
 from app.matching.schemas import CandidateChunk
+from app.models.enums import ContentVersionKind
+from app.services.content_organization import (
+    CrossLevelBulletSnapshot,
+    CrossLevelPointSnapshot,
+    merge_version_content,
+    normalize_content_title,
+    plan_cross_level_dedup,
+)
 
 
 _COLLECTION_PATTERN = re.compile(r"(?:特征|特点|类型|原则|步骤|流程|因素|模块|构成|内容|方法)(?:是|为|包括|包含|如下|[：:]?\s*$)")
@@ -18,7 +26,7 @@ class GeneratedRecord:
 
 
 def normalize_title(value: str) -> str:
-    return re.sub(r"[^\w\u4e00-\u9fff]+", "", value, flags=re.UNICODE).casefold()
+    return normalize_content_title(value)
 
 
 def organize_generated_records(records: list[GeneratedRecord]) -> list[GeneratedRecord]:
@@ -56,7 +64,86 @@ def organize_generated_records(records: list[GeneratedRecord]) -> list[Generated
             removed.add(child_index)
         deduplicated[parent_index] = current_parent
 
-    return [record for index, record in enumerate(deduplicated) if index not in removed]
+    folded = [record for index, record in enumerate(deduplicated) if index not in removed]
+    return _deduplicate_cross_level(folded)
+
+
+def _deduplicate_cross_level(records: list[GeneratedRecord]) -> list[GeneratedRecord]:
+    """Remove exact Bullet/KnowledgePoint title collisions within one generation scope."""
+    result = list(records)
+    snapshots = [CrossLevelPointSnapshot(
+        scope=record.syllabus_chapter,
+        title=record.result.knowledge_point_title,
+        bullets=tuple(CrossLevelBulletSnapshot(
+            title=bullet.title,
+            version_contents=(bullet.original.content, bullet.recitation.content, bullet.keywords.content),
+        ) for bullet in record.result.bullet_points),
+    ) for record in result]
+    removals: dict[int, set[int]] = {}
+    for action in plan_cross_level_dedup(snapshots):
+        owner = result[action.owner_index]
+        incoming = owner.result.bullet_points[action.bullet_index]
+        if action.merge_into_target:
+            result[action.target_index] = _merge_generated_bullet_into_record(
+                result[action.target_index], incoming, owner.candidates,
+            )
+        removals.setdefault(action.owner_index, set()).add(action.bullet_index)
+    for owner_index, bullet_indexes in removals.items():
+        owner = result[owner_index]
+        result[owner_index] = GeneratedRecord(
+            syllabus_chapter=owner.syllabus_chapter,
+            syllabus_item=owner.syllabus_item,
+            parent_syllabus_item=owner.parent_syllabus_item,
+            result=owner.result.model_copy(update={
+                "bullet_points": [
+                    bullet for index, bullet in enumerate(owner.result.bullet_points)
+                    if index not in bullet_indexes
+                ],
+            }),
+            candidates=owner.candidates,
+        )
+    return [record for record in result if record.result.bullet_points]
+
+
+def _merge_generated_bullet_into_record(
+    record: GeneratedRecord,
+    incoming: GeneratedBulletPayload,
+    incoming_candidates: list[CandidateChunk],
+) -> GeneratedRecord:
+    bullets = list(record.result.bullet_points)
+    target_index = max(range(len(bullets)), key=lambda index: _generated_content_overlap(bullets[index], incoming))
+    bullets[target_index] = _merge_generated_bullets(bullets[target_index], incoming)
+    return GeneratedRecord(
+        syllabus_chapter=record.syllabus_chapter,
+        syllabus_item=record.syllabus_item,
+        parent_syllabus_item=record.parent_syllabus_item,
+        result=record.result.model_copy(update={"bullet_points": bullets}),
+        candidates=_merge_candidates(record.candidates, incoming_candidates),
+    )
+
+
+def _generated_content_overlap(first: GeneratedBulletPayload, second: GeneratedBulletPayload) -> int:
+    first_terms = set(re.findall(r"[A-Za-z0-9]+|[\u4e00-\u9fff]", first.original.content.casefold()))
+    second_terms = set(re.findall(r"[A-Za-z0-9]+|[\u4e00-\u9fff]", second.original.content.casefold()))
+    return len(first_terms & second_terms)
+
+
+def _merge_generated_bullets(
+    preferred: GeneratedBulletPayload,
+    additional: GeneratedBulletPayload,
+) -> GeneratedBulletPayload:
+    def merged(kind: ContentVersionKind):
+        first = getattr(preferred, kind.value)
+        second = getattr(additional, kind.value)
+        return first.model_copy(update={"content": merge_version_content(kind, first.content, second.content)})
+
+    return preferred.model_copy(update={
+        "original": merged(ContentVersionKind.ORIGINAL),
+        "recitation": merged(ContentVersionKind.RECITATION),
+        "keywords": merged(ContentVersionKind.KEYWORDS),
+        "source_chunk_ids": list(dict.fromkeys([*preferred.source_chunk_ids, *additional.source_chunk_ids])),
+        "source_pages": sorted(set([*preferred.source_pages, *additional.source_pages])),
+    })
 
 
 def _deduplicate_knowledge_points(records: list[GeneratedRecord]) -> list[GeneratedRecord]:
