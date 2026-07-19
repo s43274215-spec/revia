@@ -97,29 +97,44 @@ class GenerationTaskRunner:
         if not self._claim_local(job_id):
             return
         try:
-            if self._bind.dialect.name == "postgresql":
-                await self._run_with_postgres_lock(workspace_id, project_id, job_id)
-            else:
-                await self._run_service(self._session_factory, workspace_id, project_id, job_id)
+            # Run the complete durable workflow on a dedicated worker thread.
+            # Generation uses synchronous SQLAlchemy calls and CPU-heavy matching;
+            # keeping those calls off FastAPI's event loop is required so /health
+            # and polling endpoints remain responsive on a small single instance.
+            await asyncio.to_thread(self._run_blocking, workspace_id, project_id, job_id)
         finally:
             self._release_local(job_id)
 
     async def resume_incomplete(self) -> bool:
-        with self._session_factory() as db:
-            row = db.execute(
-                select(Project.workspace_id, GenerationJob.project_id, GenerationJob.id)
-                .join(Project, GenerationJob.project_id == Project.id)
-                .where(GenerationJob.status.in_(_ACTIVE_GENERATION_STATUSES))
-                .order_by(GenerationJob.started_at.asc(), GenerationJob.created_at.asc())
-                .limit(1)
-            ).first()
+        row = await asyncio.to_thread(self._next_incomplete_job)
         if row is None:
             return False
         workspace_id, project_id, job_id = row
         await self.run(workspace_id, project_id, job_id)
         return True
 
-    async def _run_with_postgres_lock(
+    def _next_incomplete_job(self):
+        with self._session_factory() as db:
+            return db.execute(
+                select(Project.workspace_id, GenerationJob.project_id, GenerationJob.id)
+                .join(Project, GenerationJob.project_id == Project.id)
+                .where(GenerationJob.status.in_(_ACTIVE_GENERATION_STATUSES))
+                .order_by(GenerationJob.started_at.asc(), GenerationJob.created_at.asc())
+                .limit(1)
+            ).first()
+
+    def _run_blocking(
+        self,
+        workspace_id: uuid.UUID,
+        project_id: uuid.UUID,
+        job_id: uuid.UUID,
+    ) -> None:
+        if self._bind.dialect.name == "postgresql":
+            self._run_with_postgres_lock(workspace_id, project_id, job_id)
+        else:
+            self._run_service(self._session_factory, workspace_id, project_id, job_id)
+
+    def _run_with_postgres_lock(
         self,
         workspace_id: uuid.UUID,
         project_id: uuid.UUID,
@@ -133,14 +148,14 @@ class GenerationTaskRunner:
                 return
             locked_factory = sessionmaker(bind=connection, autoflush=False, expire_on_commit=False)
             try:
-                await self._run_service(locked_factory, workspace_id, project_id, job_id)
+                self._run_service(locked_factory, workspace_id, project_id, job_id)
             finally:
                 connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": lock_key})
                 connection.commit()
         finally:
             connection.close()
 
-    async def _run_service(
+    def _run_service(
         self,
         factory: Callable[[], Session],
         workspace_id: uuid.UUID,
@@ -150,9 +165,7 @@ class GenerationTaskRunner:
         try:
             with factory() as db:
                 service = build_generation_service(db, self._settings, workspace_id)
-                await service.process(project_id, job_id)
-        except asyncio.CancelledError:
-            raise
+                asyncio.run(service.process(project_id, job_id))
         except Exception:
             logger.exception("Persistent generation worker failed job_id=%s project_id=%s", job_id, project_id)
 

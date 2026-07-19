@@ -61,6 +61,7 @@ export function LearningPage({ projectId }: { projectId: string }) {
   const navigationSuppressedUntilRef = useRef(0);
   const generationStartGateRef = useRef(new SinglePromiseGate<GenerationJob>());
   const generationAttemptedAtRef = useRef(0);
+  const generationPollFailuresRef = useRef(0);
   const activeProject = history.present.find((project) => project.id === activeProjectId) ?? null;
   const deferredQuery = useDeferredValue(query.trim());
   const effectiveQuery = query.trim() ? deferredQuery : "";
@@ -113,10 +114,12 @@ export function LearningPage({ projectId }: { projectId: string }) {
           : await getLatestGenerationJob(projectId);
         if (!active) return;
         if (!current || (!generationJob && Date.parse(current.created_at) < generationAttemptedAtRef.current - 10_000)) {
-          setGenerationReconnecting(true);
-          timer = window.setTimeout(poll, 1000);
+          generationPollFailuresRef.current += 1;
+          if (generationPollFailuresRef.current >= 2) setGenerationReconnecting(true);
+          timer = window.setTimeout(poll, 2000);
           return;
         }
+        generationPollFailuresRef.current = 0;
         if (current.status === "failed") {
           setGenerationJob(current);
           setGenerationReconnecting(false);
@@ -133,14 +136,15 @@ export function LearningPage({ projectId }: { projectId: string }) {
         }
         setGenerationJob(current);
         setGenerationReconnecting(false);
-        timer = window.setTimeout(poll, 300);
+        timer = window.setTimeout(poll, 1500);
       } catch {
         if (!active) return;
-        setGenerationReconnecting(true);
-        timer = window.setTimeout(poll, 1000);
+        generationPollFailuresRef.current += 1;
+        if (generationPollFailuresRef.current >= 2) setGenerationReconnecting(true);
+        timer = window.setTimeout(poll, 2000);
       }
     };
-    timer = window.setTimeout(poll, generationReconnecting ? 1000 : 300);
+    timer = window.setTimeout(poll, generationReconnecting ? 2000 : 1000);
     return () => { active = false; window.clearTimeout(timer); };
   }, [generationJob, generationReconnecting, loadProjects, projectId]);
 
@@ -284,7 +288,7 @@ export function LearningPage({ projectId }: { projectId: string }) {
         </section>
       </>}
       {menu && <ContextMenu menu={menu} readOnly={isDemo} onSingleEdit={() => edit("single")} onGlobalEdit={() => edit("global")} onDelete={remove} />}
-      {(generationJob || generationError || generationStarting || generationReconnecting) && <div className="generation-overlay" role="status"><div>{!generationError && <i />}<span>{generationError ? "重新生成失败" : generationReconnecting ? "正在重新连接" : generationStarting ? "正在提交重新生成任务" : generationStatusLabels[generationJob!.status]}</span><h2>{generationError ? "无法重新生成学习材料" : "重新生成学习材料"}</h2><p>{generationError || (generationReconnecting ? "连接暂时中断，正在继续查询已有任务，不会重复创建。" : generationJob && generationJob.total_items > 0 ? `已处理 ${generationJob.processed_items} / ${generationJob.total_items} 项 · ${generationJob.progress}%` : "正在基于现有资料生成新的学习材料，请稍候。")}</p>{generationError && <div className="generation-error-actions"><button onClick={() => { setGenerationJob(null); setGenerationError(null); }}>取消</button><button className="entry-primary" onClick={() => { void regenerate(); }}>重试</button></div>}</div></div>}
+      {(generationJob || generationError || generationStarting || generationReconnecting) && <div className="generation-overlay" role="status"><div>{!generationError && <i />}<span>{generationError ? "重新生成失败" : generationReconnecting ? "正在重新连接" : generationStarting ? "正在提交重新生成任务" : generationStatusLabels[generationJob!.status]}</span><h2>{generationError ? "无法重新生成学习材料" : "重新生成学习材料"}</h2><p>{generationError || (generationReconnecting ? "连接暂时中断，正在继续查询已有任务，不会重复创建。" : generationJob && generationJob.total_items > 0 ? generationJob.status === "matching" ? `正在匹配 ${generationJob.total_items} 个考点 · ${generationJob.progress}%` : `已处理 ${generationJob.processed_items} / ${generationJob.total_items} 项 · ${generationJob.progress}%` : "正在基于现有资料生成新的学习材料，请稍候。")}</p>{generationError && <div className="generation-error-actions"><button onClick={() => { setGenerationJob(null); setGenerationError(null); }}>取消</button><button className="entry-primary" onClick={() => { void regenerate(); }}>重试</button></div>}</div></div>}
     </main>
   );
 }

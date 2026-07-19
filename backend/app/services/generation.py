@@ -211,9 +211,9 @@ class GenerationWorkflowService:
             )
             if needs_matching:
                 self._set_status(job, GenerationStatus.MATCHING, progress=max(10, min(job.progress or 0, 35)))
-                plans, matches = await asyncio.to_thread(self._plan_and_match, syllabus_items, chunks)
+                plans, matches = self._plan_and_match(syllabus_items, chunks, job=job)
                 plans, matches = await self._apply_query_rewrite_fallbacks(plans, matches, chunks, job=job)
-                matches = await asyncio.to_thread(self._matching.resolve_dependent_matches, plans, matches)
+                matches = self._matching.resolve_dependent_matches(plans, matches)
 
                 for index, match in enumerate(matches):
                     self._db.refresh(job)
@@ -312,11 +312,19 @@ class GenerationWorkflowService:
         self,
         syllabus_items: list,
         chunks: list[TextChunk],
+        *,
+        job: GenerationJob | None = None,
     ) -> tuple[list[QueryPlan], list[ItemMatch]]:
         if self._matching is None:
             raise RuntimeError("Matching service is not initialized")
         plans = self._matching.plan_items(syllabus_items)
-        matches = [self._matching.match_plan(plan=plan, chunks=chunks) for plan in plans]
+        matches: list[ItemMatch] = []
+        for index, plan in enumerate(plans):
+            matches.append(self._matching.match_plan(plan=plan, chunks=chunks))
+            if job is not None:
+                job.progress = max(job.progress or 0, min(24, 10 + int(14 * (index + 1) / max(len(plans), 1))))
+                job.last_activity_at = datetime.now(UTC)
+                self._db.commit()
         return plans, matches
 
     async def _apply_query_rewrite_fallbacks(
