@@ -216,6 +216,10 @@ export function getLatestGenerationJob(projectId: string): Promise<GenerationJob
   return apiRequest<GenerationJob | null>(`/projects/${projectId}/generation-jobs/latest`);
 }
 
+export function getLatestPublishedGenerationJob(projectId: string): Promise<GenerationJob | null> {
+  return apiRequest<GenerationJob | null>(`/projects/${projectId}/generation-jobs/latest-published`);
+}
+
 export function getLearningMaterial(projectId: string): Promise<LearningMaterialResponse> {
   return apiRequest<LearningMaterialResponse>(`/projects/${projectId}/learning-material`);
 }

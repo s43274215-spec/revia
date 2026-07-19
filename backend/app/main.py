@@ -7,8 +7,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.router import api_router
 from app.api.v1.endpoints.documents import build_document_processing_service
+from app.api.v1.endpoints.generation import GenerationTaskRunner
 from app.core.config import get_settings
-from app.db.session import SessionLocal
+from app.db.session import SessionLocal, engine
 from app.services.document_processing import DocumentTaskRunner
 
 settings = get_settings()
@@ -46,7 +47,10 @@ async def lifespan(application: FastAPI):
         lambda db: build_document_processing_service(db, settings),
     )
     application.state.document_task_runner = runner
-    async def keep_queue_moving() -> None:
+    generation_runner = GenerationTaskRunner(SessionLocal, settings, engine)
+    application.state.generation_task_runner = generation_runner
+
+    async def keep_document_queue_moving() -> None:
         while True:
             try:
                 await asyncio.to_thread(runner.resume_incomplete)
@@ -54,13 +58,29 @@ async def lifespan(application: FastAPI):
                 logging.getLogger("revia.documents").exception("Persistent document queue dispatch failed")
             await asyncio.sleep(min(30, max(5, settings.document_lease_seconds // 3)))
 
-    resume_task = asyncio.create_task(keep_queue_moving())
+    async def keep_generation_queue_moving() -> None:
+        while True:
+            try:
+                worked = await generation_runner.resume_incomplete()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logging.getLogger("revia.generation").exception("Persistent generation queue dispatch failed")
+                worked = False
+            await asyncio.sleep(1 if worked else 5)
+
+    resume_tasks = [
+        asyncio.create_task(keep_document_queue_moving()),
+        asyncio.create_task(keep_generation_queue_moving()),
+    ]
     yield
-    resume_task.cancel()
-    try:
-        await resume_task
-    except asyncio.CancelledError:
-        pass
+    for task in resume_tasks:
+        task.cancel()
+    for task in resume_tasks:
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)

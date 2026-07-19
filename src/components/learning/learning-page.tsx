@@ -11,7 +11,7 @@ import { Toolbar } from "./toolbar";
 import { SearchResults } from "./search-results";
 import { searchProject } from "./reader-search";
 import { classifyContentBlocks } from "./content-format";
-import { GenerationJob, GenerationStatus, downloadWordExport, getBackendProject, getGenerationJob, getLatestGenerationJob, getLearningMaterial, listProjects, startGeneration } from "@/lib/revia-api";
+import { GenerationJob, GenerationStatus, downloadWordExport, getBackendProject, getGenerationJob, getLatestGenerationJob, getLatestPublishedGenerationJob, getLearningMaterial, listProjects, startGeneration } from "@/lib/revia-api";
 import { isTransientNetworkError, SinglePromiseGate } from "@/lib/generation-reliability";
 import { toLearningProject, toProjectShell } from "@/lib/learning-material-adapter";
 import { useAuth } from "@/components/auth/auth-provider";
@@ -71,11 +71,11 @@ export function LearningPage({ projectId }: { projectId: string }) {
   const activeSearchTarget = searchResults[activeSearchIndex]?.targetId;
 
   const loadProjects = useCallback(async () => {
-    const [project, material, projects, latestJob] = await Promise.all([
+    const [project, material, projects, latestPublishedJob] = await Promise.all([
       getBackendProject(projectId),
       getLearningMaterial(projectId),
       listProjects(),
-      getLatestGenerationJob(projectId).catch(() => null),
+      getLatestPublishedGenerationJob(projectId).catch(() => null),
     ]);
     const current = toLearningProject(project, material);
     const sidebarProjects = projects
@@ -84,7 +84,7 @@ export function LearningPage({ projectId }: { projectId: string }) {
     if (!sidebarProjects.some((item) => item.id === projectId)) sidebarProjects.unshift(current);
     setHistory({ past: [], present: sidebarProjects, future: [] });
     setActiveProjectId(projectId);
-    setPartialGenerationJob(latestJob?.status === "partial_failed" ? latestJob : null);
+    setPartialGenerationJob(latestPublishedJob?.status === "partial_failed" ? latestPublishedJob : null);
   }, [projectId]);
 
   useEffect(() => {
