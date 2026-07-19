@@ -20,9 +20,9 @@ const project = {
       bulletPoints: [{
         id: "bullet-effects",
         versions: {
-          original: { title: "内部标题：完整解释", content: ["详细正文只在详细版出现。\n\n1. 私人成本\n2. 社会成本"] },
-          recitation: { title: "内部标题：标准表达", content: ["标准版正文包含考试表达。"] },
-          keywords: { title: "内部标题：记忆线索", content: ["简洁关键词", "成本偏离"] },
+          original: { title: "内部标题：完整解释", content: ["原文版本正文只在原文版本出现。\n\n1. 私人成本\n2. 社会成本"] },
+          recitation: { title: "内部标题：背诵表达", content: ["背诵版本正文包含考试表达。"] },
+          keywords: { title: "内部标题：记忆线索", content: ["关键词版本线索", "成本偏离"] },
         },
       }],
     }],
@@ -36,7 +36,7 @@ test("searches source chapter, knowledge and inner titles", () => {
 });
 
 test("searches current-version body and list items with stable targets", () => {
-  const body = searchProject(project, "original", "详细正文", classifyContentBlocks);
+  const body = searchProject(project, "original", "原文版本正文", classifyContentBlocks);
   assert.equal(body[0].targetId, "bullet-effects-original-block-0");
   const list = searchProject(project, "original", "社会成本", classifyContentBlocks);
   assert.equal(list[0].kind, "列表项");
@@ -44,9 +44,9 @@ test("searches current-version body and list items with stable targets", () => {
 });
 
 test("switching versions recalculates body results without duplicating other versions", () => {
-  assert.equal(searchProject(project, "recitation", "标准版正文", classifyContentBlocks).length, 1);
-  assert.equal(searchProject(project, "recitation", "详细正文", classifyContentBlocks).length, 0);
-  assert.equal(searchProject(project, "keywords", "简洁关键词", classifyContentBlocks).length, 1);
+  assert.equal(searchProject(project, "recitation", "背诵版本正文", classifyContentBlocks).length, 1);
+  assert.equal(searchProject(project, "recitation", "原文版本正文", classifyContentBlocks).length, 0);
+  assert.equal(searchProject(project, "keywords", "关键词版本线索", classifyContentBlocks).length, 1);
 });
 
 test("empty and unmatched searches return no results", () => {

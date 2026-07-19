@@ -3,7 +3,7 @@
 import { MouseEvent, UIEvent, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ContextMenu, MenuState } from "./context-menu";
-import { BulletPoint, PointVersions, Project, Version, VersionPoint } from "./data";
+import { BulletPoint, PointVersions, Project, Version, VersionPoint, versionContract } from "./data";
 import { DrawerState, OperationDrawer } from "./keyword-drawer";
 import { ReadingContent } from "./reading-content";
 import { OutlineSidebar, ProjectSidebar } from "./sidebars";
@@ -16,7 +16,7 @@ import { isTransientNetworkError, SinglePromiseGate } from "@/lib/generation-rel
 import { toLearningProject, toProjectShell } from "@/lib/learning-material-adapter";
 import { useAuth } from "@/components/auth/auth-provider";
 
-const tabs: { id: Version; label: string }[] = [{ id: "keywords", label: "简洁版" }, { id: "recitation", label: "标准版" }, { id: "original", label: "详细版" }];
+const tabs: readonly { id: Version; label: string }[] = versionContract;
 type History = { past: Project[][]; present: Project[]; future: Project[][] };
 const terminalGenerationStatuses = new Set<GenerationStatus>(["completed", "partial_failed", "failed"]);
 const generationStatusLabels: Record<GenerationStatus, string> = {

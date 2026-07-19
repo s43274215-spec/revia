@@ -17,16 +17,13 @@ from app.models.enums import ContentVersionKind
 from app.models.project import GenerationJob, Project
 
 
-VERSION_LABELS = {
-    ContentVersionKind.KEYWORDS: "简洁版",
-    ContentVersionKind.RECITATION: "标准版",
-    ContentVersionKind.ORIGINAL: "详细版",
-}
-ALL_VERSION_ORDER = (
-    ContentVersionKind.KEYWORDS,
-    ContentVersionKind.RECITATION,
-    ContentVersionKind.ORIGINAL,
+VERSION_CONTRACT = (
+    (ContentVersionKind.ORIGINAL, "原文版本"),
+    (ContentVersionKind.RECITATION, "背诵版本"),
+    (ContentVersionKind.KEYWORDS, "关键词版本"),
 )
+VERSION_LABELS = dict(VERSION_CONTRACT)
+ALL_VERSION_ORDER = tuple(kind for kind, _ in VERSION_CONTRACT)
 _UNSAFE_FILENAME = re.compile(r'[<>:"/\\|?*：／＼\x00-\x1f]+')
 _ORDERED_ITEM = re.compile(r"^\s*(?:\d+[.、)）]|[（(][一二三四五六七八九十百\d]+[）)])\s*(.+)$")
 _BULLET_ITEM = re.compile(r"^\s*[-–—•·]\s*(.+)$")

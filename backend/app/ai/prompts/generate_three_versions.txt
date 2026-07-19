@@ -18,4 +18,4 @@ Project → Chapter → KnowledgePoint → BulletPoint → ContentVersion。
 - bullet_points：要点数组，每项包含稳定 id 和 versions。
 - versions：必须且只能包含 original、recitation、keywords 三项。
 - 每个版本分别包含 kind、title、content。
-- original 保留完整信息；recitation 适合背诵和考试表达；keywords 提供简洁记忆线索。
+- original 保留资料核心原始内容和完整表达；recitation 在保持知识完整性的前提下整理为适合考试回答和记忆的表达；keywords 压缩为关键概念和记忆线索。
