@@ -390,6 +390,16 @@ mark { padding:1px 2px; background:#dfe9e3; color:inherit; }
 .workspace-logout:hover { border-color:#ccd6d0; color:var(--accent); }
 .upload-limit-note { margin:-4px 0 14px 48px; color:var(--muted); font-size:10px; line-height:1.6; }
 .owner-task-note { width:max-content; margin:-7px 0 15px 48px; padding:5px 9px; border:1px solid #d8dfda; border-radius:999px; background:#f5f7f5; color:var(--accent); font-size:9px; font-weight:600; }
+.document-recovery-card { display:grid; gap:10px; margin:0 0 16px 48px; padding:16px 17px; border:1px solid #d4ddd6; border-radius:9px; background:#f5f7f5; }
+.document-recovery-heading { display:flex; align-items:center; justify-content:space-between; gap:16px; }
+.document-recovery-heading span { color:var(--accent); font-size:9px; font-weight:700; letter-spacing:.08em; }
+.document-recovery-heading strong { max-width:55%; overflow:hidden; font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
+.document-recovery-card p { margin:0; color:var(--muted); font-size:10px; line-height:1.65; }
+.document-recovery-card .document-recovery-reason { color:#8b5a54; }
+.document-recovery-actions { display:flex; align-items:center; gap:12px; margin-top:2px; }
+.document-recovery-actions button { min-width:94px; height:34px; padding:0 13px; font-size:10px; }
+.document-recovery-actions span { color:var(--faint); font-size:9px; }
+@media (max-width:700px) { .document-recovery-card { margin-left:0; } .document-recovery-heading,.document-recovery-actions { align-items:flex-start; flex-direction:column; } .document-recovery-heading strong { max-width:100%; } }
 .site-access-settings { margin-top:24px; }
 .site-access-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; }
 .site-access-heading strong { display:block; color:var(--ink); font-size:11px; }

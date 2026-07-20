@@ -19,9 +19,11 @@ import {
   getLearningMaterial,
   saveSyllabus,
   startGeneration,
+  resumeDocument,
   uploadPDF,
 } from "@/lib/revia-api";
 import { isTransientNetworkError, SinglePromiseGate } from "@/lib/generation-reliability";
+import { documentRecoverySummary } from "@/lib/document-recovery";
 import { generationFailureCounts, generationFailureLabel, generationFailureReason, successfulGenerationCount } from "@/lib/generation-failures";
 import { FileDropZone, SelectedPDF } from "./file-drop-zone";
 import { SettingsTrigger } from "@/components/settings/settings-trigger";
@@ -74,6 +76,8 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
   const [generationReconnecting, setGenerationReconnecting] = useState(false);
   const [documentProgress, setDocumentProgress] = useState<DocumentProgress | null>(null);
   const [uploadStage, setUploadStage] = useState<"uploading" | "processing" | null>(null);
+  const [recoveringDocument, setRecoveringDocument] = useState(false);
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
   const generationStartRequestedRef = useRef(false);
   const generationStartGateRef = useRef(new SinglePromiseGate<GenerationJob>());
   const generationAttemptedAtRef = useRef(0);
@@ -157,6 +161,12 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
         if (["queued", "processing", "parsing", "interrupted"].includes(latest.processing_status)) {
           setGenerating(true);
           setUploadStage("processing");
+          setRecoveryError(null);
+        }
+        if (latest.processing_status === "failed") {
+          setGenerating(false);
+          setUploadStage(null);
+          setRecoveryError(latest.error_message || "PDF 处理失败，可从已完成页面继续识别。");
         }
         if (latest.processing_status === "parsed") {
           void resumeGenerationAfterParsing();
@@ -174,8 +184,14 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
         const current = await getDocumentProgress(projectId, documentProgress.id);
         if (!active) return;
         setDocumentProgress(current);
-        if (current.processing_status === "failed") setError(current.error_message || "PDF 解析失败");
+        if (current.processing_status === "failed") {
+          setGenerating(false);
+          setUploadStage(null);
+          setError(null);
+          setRecoveryError(current.error_message || "PDF 处理失败，可从已完成页面继续识别。");
+        }
         if (current.processing_status === "parsed") {
+          setRecoveryError(null);
           setUploadStage(null);
           void resumeGenerationAfterParsing();
         }
@@ -239,6 +255,28 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
     };
   }, [generationReconnecting, job, openLearningMaterial, projectId]);
 
+  const failedCourseDocument = documentProgress?.kind === "course_material" && documentProgress.processing_status === "failed"
+    ? documentProgress
+    : null;
+  const recoverySummary = failedCourseDocument ? documentRecoverySummary(failedCourseDocument) : null;
+
+  const continueDocumentRecognition = async () => {
+    if (!failedCourseDocument || recoveringDocument) return;
+    setRecoveringDocument(true);
+    setRecoveryError(null);
+    setError(null);
+    try {
+      const resumed = await resumeDocument(projectId, failedCourseDocument.id);
+      setDocumentProgress(resumed);
+      setGenerating(true);
+      setUploadStage("processing");
+    } catch (reason) {
+      setRecoveryError(reason instanceof Error ? reason.message : "无法继续识别原 PDF");
+    } finally {
+      setRecoveringDocument(false);
+    }
+  };
+
   const hasParsedCourse = documentProgress?.kind === "course_material" && documentProgress.processing_status === "parsed";
   const canGenerate = (courseFiles.length > 0 || hasParsedCourse) && (syllabusFiles.length > 0 || syllabusText.trim().length > 0);
 
@@ -283,6 +321,14 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
         return;
       }
       const message = reason instanceof Error ? reason.message : "生成流程启动失败";
+      const latestDocument = await getLatestDocument(projectId, "course_material").catch(() => null);
+      if (latestDocument?.processing_status === "failed") {
+        setDocumentProgress(latestDocument);
+        setGenerating(false);
+        setError(null);
+        setRecoveryError(latestDocument.error_message || message);
+        return;
+      }
       const activeDocument = await getActiveDocument().catch(() => null);
       setError(activeDocument ? activeDocumentMessage(activeDocument) : message);
     }
@@ -339,7 +385,21 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
             ? "站长工作区每次只能有一份资料排队或处理中，不受最近 24 小时页数额度限制。"
             : "每次只能有一份资料排队或处理中；最近 24 小时最多累计处理 1200 页。"}</p>
           {role === "owner" && <p className="owner-task-note">站长任务 · 提交后进入优先队列</p>}
-          <FileDropZone title="拖拽完整课程资料到这里" hint="或点击选择文件，仅支持单个 PDF" kind="course_material" files={courseFiles} onFiles={setCourseFiles} />
+          {failedCourseDocument && recoverySummary && <div className="document-recovery-card" role="status">
+            <div className="document-recovery-heading"><span>已保留原 PDF 和识别进度</span><strong>{recoverySummary.filename}</strong></div>
+            <p>已完成 {recoverySummary.progress}，继续后会从下一张未完成页面开始，不会清空已有结果。</p>
+            <p className="document-recovery-reason">{recoveryError || recoverySummary.reason}</p>
+            <div className="document-recovery-actions">
+              <button
+                type="button"
+                className="entry-primary"
+                disabled={!recoverySummary.canResume || recoveringDocument}
+                onClick={() => void continueDocumentRecognition()}
+              >{recoveringDocument ? "正在恢复…" : recoverySummary.canResume ? "继续识别" : "原文件不可恢复"}</button>
+              <span>{recoverySummary.canResume ? "也可以在下方重新上传新的 PDF。" : "请在下方重新上传原 PDF。"}</span>
+            </div>
+          </div>}
+          <FileDropZone title={failedCourseDocument ? "重新上传课程资料" : "拖拽完整课程资料到这里"} hint={failedCourseDocument ? "仅在不继续原任务时使用；会创建新的处理记录" : "或点击选择文件，仅支持单个 PDF"} kind="course_material" files={courseFiles} onFiles={setCourseFiles} />
         </div>
         <div className="upload-section">
           <div className="upload-section-label"><span>02</span><div><h2>填写考试范围</h2><p>上传考纲 PDF，或直接输入考纲内容。</p></div></div>

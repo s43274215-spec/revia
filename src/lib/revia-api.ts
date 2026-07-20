@@ -95,6 +95,7 @@ export type DocumentProgress = {
   error_message: string | null;
   created_at: string;
   is_resuming: boolean;
+  can_resume: boolean;
   queue_position: number | null;
 };
 
@@ -198,6 +199,12 @@ export function getLatestDocument(
 
 export function getActiveDocument(): Promise<ActiveDocument | null> {
   return apiRequest<ActiveDocument | null>("/projects/active-document");
+}
+
+export function resumeDocument(projectId: string, documentId: string): Promise<DocumentProgress> {
+  return apiRequest<DocumentProgress>(`/projects/${projectId}/documents/${documentId}/resume`, {
+    method: "POST",
+  });
 }
 
 export function cancelDocument(projectId: string, documentId: string): Promise<DocumentProgress> {

@@ -27,10 +27,10 @@ from app.document.structure import BlockKind, StructuredText, TextBlock
 from app.main import app
 from app.models.document import DocumentPage, ParsedDocument, ParsedPage, TextChunk
 from app.models.project import Document, Project
-from app.models.enums import DocumentKind, DocumentProcessingStatus
+from app.models.enums import DocumentKind, DocumentProcessingStatus, ProjectStatus
 from app.models.workspace import Workspace
 from app.services.document_processing import DocumentProcessingError, DocumentProcessingService
-from app.services.storage import LocalFileStorage
+from app.services.storage import LocalFileStorage, build_object_key
 from tests.helpers import authorization_header
 
 
@@ -290,6 +290,87 @@ class DocumentUploadAPITests(unittest.TestCase):
         )
         self.assertEqual(invalid.status_code, 422, invalid.text)
         self.assertIn(".pdf", invalid.json()["detail"])
+
+    def test_failed_document_remains_visible_with_resume_capability(self) -> None:
+        content = build_test_pdf()
+        document_id = uuid.uuid4()
+        object_key = build_object_key(self.workspace_id, document_id)
+        object_path = Path(self.storage.name, object_key)
+        object_path.parent.mkdir(parents=True, exist_ok=True)
+        object_path.write_bytes(content)
+        with self.Session() as session:
+            session.add(Document(
+                id=document_id,
+                project_id=self.project_id,
+                kind=DocumentKind.COURSE_MATERIAL,
+                original_name="recoverable.pdf",
+                mime_type="application/pdf",
+                size_bytes=len(content),
+                storage_key=object_key,
+                storage_backend="local",
+                processing_status=DocumentProcessingStatus.FAILED,
+                processing_phase="failed",
+                total_pages=2,
+                processed_pages=1,
+                current_page=2,
+                retry_count=50,
+                error_message="无法从对象存储下载 PDF",
+            ))
+            session.commit()
+
+        response = self.client.get(
+            f"/api/v1/projects/{self.project_id}/documents/latest?kind=course_material"
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["id"], str(document_id))
+        self.assertTrue(payload["can_resume"])
+        self.assertEqual(payload["processed_pages"], 1)
+        self.assertEqual(payload["total_pages"], 2)
+        with self.Session() as session:
+            project = session.get(Project, self.project_id)
+            assert project is not None
+            self.assertEqual(project.status, ProjectStatus.FAILED)
+
+    def test_failed_document_resume_endpoint_requeues_and_processes_original_pdf(self) -> None:
+        content = build_test_pdf()
+        document_id = uuid.uuid4()
+        object_key = build_object_key(self.workspace_id, document_id)
+        object_path = Path(self.storage.name, object_key)
+        object_path.parent.mkdir(parents=True, exist_ok=True)
+        object_path.write_bytes(content)
+        with self.Session() as session:
+            session.add(Document(
+                id=document_id,
+                project_id=self.project_id,
+                kind=DocumentKind.COURSE_MATERIAL,
+                original_name="resume.pdf",
+                mime_type="application/pdf",
+                size_bytes=len(content),
+                storage_key=object_key,
+                storage_backend="local",
+                processing_status=DocumentProcessingStatus.FAILED,
+                processing_phase="failed",
+                total_pages=2,
+                processed_pages=0,
+                current_page=1,
+                retry_count=50,
+                error_message="无法从对象存储下载 PDF",
+            ))
+            session.commit()
+
+        response = self.client.post(
+            f"/api/v1/projects/{self.project_id}/documents/{document_id}/resume"
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(response.json()["processing_status"], "queued")
+        self.assertFalse(response.json()["can_resume"])
+        with self.Session() as session:
+            document = session.get(Document, document_id)
+            assert document is not None
+            self.assertEqual(document.processing_status, DocumentProcessingStatus.PARSED)
+            self.assertEqual(document.processed_pages, 2)
+            self.assertEqual(document.retry_count, 0)
 
     def test_saved_syllabus_can_be_restored_after_page_refresh(self) -> None:
         saved = self.client.put(

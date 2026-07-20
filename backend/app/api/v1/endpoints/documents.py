@@ -30,6 +30,7 @@ from app.services.document_processing import (
     DocumentNotFoundError,
     DocumentProcessingError,
     DocumentQuotaError,
+    DocumentResumeError,
     DocumentProcessingService,
     DocumentProjectNotFoundError,
     DocumentTaskRunner,
@@ -37,6 +38,7 @@ from app.services.document_processing import (
 from app.services.storage import (
     LocalStorageProvider,
     StorageError,
+    StorageUnavailableError,
     UploadAuthorizationError,
     UploadLimitError,
     build_storage_provider,
@@ -260,6 +262,33 @@ def get_document_progress(
     return _progress(document, service.queue_position(document))
 
 
+@router.post(
+    "/{project_id}/documents/{document_id}/resume",
+    response_model=DocumentProgressRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def resume_failed_document(
+    project_id: uuid.UUID,
+    document_id: uuid.UUID,
+    workspace_id: WritableWorkspaceId,
+    service: DocumentService,
+    runner: DocumentRunner,
+    background_tasks: BackgroundTasks,
+) -> DocumentProgressRead:
+    try:
+        document = service.resume_failed_document(workspace_id, project_id, document_id)
+    except DocumentNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except DocumentQuotaError as exc:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
+    except DocumentResumeError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except StorageUnavailableError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    background_tasks.add_task(runner.run, document.id)
+    return _progress(document, service.queue_position(document))
+
+
 @router.post("/{project_id}/documents/{document_id}/cancel", response_model=DocumentProgressRead)
 def cancel_document(
     project_id: uuid.UUID,
@@ -380,6 +409,10 @@ def _schedule_resume(document: Document, runner: DocumentTaskRunner, background_
 def _progress(document: Document, queue_position: int | None = None) -> DocumentProgressRead:
     payload = DocumentProgressRead.model_validate(document)
     payload.queue_position = queue_position
+    payload.can_resume = (
+        document.processing_status == DocumentProcessingStatus.FAILED
+        and document.storage_key is not None
+    )
     payload.is_resuming = document.processing_phase == "resuming" or (
         document.processed_pages > 0
         and document.processing_status in {
