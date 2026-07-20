@@ -5,7 +5,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app.models.enums import ContentVersionKind
 
-TITLE_MAX_LENGTH = 25
+TITLE_RECOMMENDED_MAX_LENGTH = 25
+TITLE_MAX_LENGTH = 200
 
 # Product guidance remains intentionally concise, but these are recommendations,
 # not reasons to discard otherwise valid learning material.
@@ -53,7 +54,7 @@ def _validate_meaningful_text(value: str) -> str:
 def _validate_generated_title(value: str) -> str:
     cleaned = _validate_meaningful_text(value)
     if len(cleaned) > TITLE_MAX_LENGTH:
-        raise ValueError(f"title must not exceed {TITLE_MAX_LENGTH} characters")
+        raise ValueError(f"title must not exceed the safety limit of {TITLE_MAX_LENGTH} characters")
     if len(_HEADING_NUMBER_PATTERN.findall(cleaned)) > 1:
         raise ValueError("title must not combine multiple heading-number levels")
     return cleaned
@@ -211,10 +212,10 @@ class GeneratedItemResult(BaseModel):
         if not isinstance(value, str):
             return value
         cleaned = value.strip()
-        if len(cleaned) <= TITLE_MAX_LENGTH:
+        if len(cleaned) <= TITLE_RECOMMENDED_MAX_LENGTH:
             return cleaned
         subject = re.split(r"[：:]", cleaned, maxsplit=1)[0].strip()
-        return subject if 1 < len(subject) <= TITLE_MAX_LENGTH else cleaned
+        return subject if 1 < len(subject) <= TITLE_RECOMMENDED_MAX_LENGTH else cleaned
 
     @field_validator("knowledge_point_title")
     @classmethod

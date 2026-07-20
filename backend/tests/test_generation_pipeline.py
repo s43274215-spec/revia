@@ -378,6 +378,22 @@ class PromptAndGeneratedItemSchemaTests(unittest.TestCase):
         accepted_one = validate_generated_item(json.dumps(one_keyword, ensure_ascii=False))
         self.assertEqual(accepted_one.bullet_points[0].keywords.content, "人力资源")
 
+        long_but_meaningful_title = "坚持科学社会主义基本原则并结合本国实际探索适合自身特点的发展道路"
+        long_title_payload = json.loads(json.dumps(valid, ensure_ascii=False))
+        long_title_payload["bullet_points"][0]["title"] = long_but_meaningful_title
+        for kind in ("original", "recitation", "keywords"):
+            long_title_payload["bullet_points"][0][kind]["title"] = long_but_meaningful_title
+        accepted_long_title = validate_generated_item(json.dumps(long_title_payload, ensure_ascii=False))
+        self.assertEqual(accepted_long_title.bullet_points[0].title, long_but_meaningful_title)
+
+        runaway_title = json.loads(json.dumps(valid, ensure_ascii=False))
+        runaway_title_value = "异常标题" * 51
+        runaway_title["bullet_points"][0]["title"] = runaway_title_value
+        for kind in ("original", "recitation", "keywords"):
+            runaway_title["bullet_points"][0][kind]["title"] = runaway_title_value
+        with self.assertRaisesRegex(AIOutputValidationError, "at most 200"):
+            validate_generated_item(json.dumps(runaway_title, ensure_ascii=False))
+
         runaway = json.loads(json.dumps(valid, ensure_ascii=False))
         runaway["bullet_points"][0]["original"]["content"] = "内容" * 4001
         with self.assertRaisesRegex(AIOutputValidationError, "at most 8000"):

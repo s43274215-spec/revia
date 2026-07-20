@@ -21,7 +21,11 @@ from app.models.document import ParsedDocument, TextChunk
 from app.models.enums import ContentVersionKind, DocumentKind, GenerationItemStatus, GenerationStatus, ProjectStatus
 from app.models.project import Document, GenerationJob, GenerationJobItem, Project
 from app.services.knowledge_hierarchy import GeneratedRecord, organize_generated_records
-from app.services.content_organization import INTERNAL_UNRESOLVED_CHAPTER, resolve_source_chapter_title
+from app.services.content_organization import (
+    INTERNAL_UNRESOLVED_CHAPTER,
+    build_reliable_source_chapter_index,
+    resolve_source_chapter_title,
+)
 from app.syllabus.parser import SyllabusParser
 
 
@@ -753,6 +757,13 @@ class GenerationWorkflowService:
     def _replace_learning_material(self, project: Project, records: list[GeneratedRecord]) -> None:
         project.chapters.clear()
         self._db.flush()
+        reliable_chapter_by_chunk_id: dict[uuid.UUID, str] = {}
+        for document in project.documents:
+            if document.kind != DocumentKind.COURSE_MATERIAL or document.parsed_document is None:
+                continue
+            reliable_chapter_by_chunk_id.update(
+                build_reliable_source_chapter_index(document.parsed_document.chunks)
+            )
         course_document = next(
             (document for document in reversed(project.documents) if document.kind == DocumentKind.COURSE_MATERIAL),
             None,
@@ -760,7 +771,14 @@ class GenerationWorkflowService:
         source_title = Path(course_document.original_name).stem.strip() if course_document is not None else "资料"
         grouped: OrderedDict[str, list[GeneratedRecord]] = OrderedDict()
         for record in records:
-            grouped.setdefault(self._source_chapter(record, source_title or "资料"), []).append(record)
+            grouped.setdefault(
+                self._source_chapter(
+                    record,
+                    source_title or "资料",
+                    reliable_chapter_by_chunk_id=reliable_chapter_by_chunk_id,
+                ),
+                [],
+            ).append(record)
 
         for chapter_position, (chapter_title, chapter_records) in enumerate(grouped.items()):
             chapter = Chapter(title=chapter_title, position=chapter_position)
@@ -798,13 +816,24 @@ class GenerationWorkflowService:
             project.chapters.append(chapter)
 
     @staticmethod
-    def _source_chapter(record: GeneratedRecord, source_title: str = "资料") -> str:
+    def _source_chapter(
+        record: GeneratedRecord,
+        source_title: str = "资料",
+        reliable_chapter_by_chunk_id: dict[uuid.UUID, str] | None = None,
+    ) -> str:
         cited_ids = [
             source_id
             for bullet in record.result.bullet_points
             for source_id in bullet.source_chunk_ids
         ]
-        return resolve_source_chapter_title(record.candidates, cited_ids) or INTERNAL_UNRESOLVED_CHAPTER
+        return (
+            resolve_source_chapter_title(
+                record.candidates,
+                cited_ids,
+                reliable_chapter_by_chunk_id=reliable_chapter_by_chunk_id,
+            )
+            or INTERNAL_UNRESOLVED_CHAPTER
+        )
 
     @staticmethod
     def _source_link(candidate: CandidateChunk, cited_pages: list[int]) -> BulletPointSource:
