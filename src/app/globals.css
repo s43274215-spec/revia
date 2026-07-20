@@ -197,9 +197,9 @@ mark { padding:1px 2px; background:#dfe9e3; color:inherit; }
 .project-table { border-top:1px solid var(--line); }
 .active-task-table { margin-bottom:32px; }
 .active-task-table .project-table-header,.active-task-table .project-row { grid-template-columns:minmax(280px,1.7fr) 1fr .7fr 170px; }
-.project-table-header,.project-row { display:grid; grid-template-columns:minmax(280px,1.7fr) 1fr .7fr 100px; align-items:center; column-gap:24px; width:100%; }
+.project-table-header,.project-row { display:grid; grid-template-columns:minmax(280px,1.7fr) 1fr .7fr 150px; align-items:center; column-gap:24px; width:100%; }
 .project-table-header { height:42px; padding:0 17px; color:var(--faint); font-size:10px; letter-spacing:.08em; }
-.project-row { min-height:86px; padding:0 17px; border:0; border-top:1px solid var(--line); background:transparent; color:var(--muted); text-align:left; font-size:11px; cursor:pointer; transition:background .16s ease; }
+.project-row { min-height:86px; padding:0 17px; border:0; border-top:1px solid var(--line); background:transparent; color:var(--muted); text-align:left; font-size:11px; transition:background .16s ease; }
 .project-row:last-child { border-bottom:1px solid var(--line); }
 .project-row:hover { background:#f7f5f0; }
 .project-course { display:flex; align-items:center; gap:13px; min-width:0; }
@@ -213,8 +213,12 @@ mark { padding:1px 2px; background:#dfe9e3; color:inherit; }
 .project-status.completed::before { background:#789486; }
 .project-status.processing { color:#78694e; }
 .project-status.processing::before { background:#a88f5d; }
-.project-arrow { color:#90938d; text-align:right; }
-.project-row:hover .project-arrow { color:var(--accent); }
+.project-actions { display:flex; align-items:center; justify-content:flex-end; gap:14px; }
+.project-actions button { padding:0; border:0; background:transparent; font:inherit; cursor:pointer; }
+.project-actions .project-enter { color:#90938d; }
+.project-actions .project-delete { color:#9b5f55; }
+.project-actions button:hover { color:var(--accent); }
+.project-actions button:disabled { opacity:.5; cursor:wait; }
 .active-task-actions { display:flex; align-items:center; justify-content:flex-end; gap:12px; }
 .active-task-actions button { padding:0; border:0; background:transparent; color:#90938d; font:inherit; cursor:pointer; }
 .active-task-actions button:hover { color:var(--accent); }
@@ -292,7 +296,8 @@ mark { padding:1px 2px; background:#dfe9e3; color:inherit; }
 .missing-project h1 { font-family:Georgia,"Songti SC",serif; }
 .missing-project button { padding:8px 12px; border:1px solid var(--line); border-radius:6px; background:#fff; cursor:pointer; }
 @keyframes spin { to { transform:rotate(360deg); } }
-@media (max-width:800px) { .entry-header { padding:0 22px; } .project-home { width:calc(100% - 36px); padding-top:42px; } .project-table-header { display:none; } .project-row { grid-template-columns:1fr auto; row-gap:8px; padding:18px 10px; } .project-row>span:nth-child(2),.project-row>span:nth-child(3) { grid-column:1; padding-left:49px; } .project-arrow { grid-column:2; grid-row:1 / 4; } .upload-content { width:calc(100% - 36px); } .upload-section { grid-template-columns:1fr; gap:20px; } .syllabus-grid { grid-template-columns:1fr; } }
+@media (max-width:800px) { .entry-header { padding:0 22px; } .project-home { width:calc(100% - 36px); padding-top:42px; } .project-table-header { display:none; } .project-row { grid-template-columns:1fr auto; row-gap:8px; padding:18px 10px; } .project-row>span:nth-child(2),.project-row>span:nth-child(3) { grid-column:1; padding-left:49px; } .project-actions,.project-arrow { grid-column:2; grid-row:1 / 4; }
+.project-actions { flex-direction:column-reverse; align-items:flex-end; gap:8px; } .upload-content { width:calc(100% - 36px); } .upload-section { grid-template-columns:1fr; gap:20px; } .syllabus-grid { grid-template-columns:1fr; } }
 
 /* Global DeepSeek settings */
 .settings-trigger { display:flex; align-items:center; gap:8px; border:0; background:transparent; color:#747873; cursor:pointer; }

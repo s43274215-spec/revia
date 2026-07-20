@@ -120,6 +120,10 @@ export function createProject(value: { name: string; description: string }): Pro
   });
 }
 
+export function deleteProject(projectId: string): Promise<void> {
+  return apiRequest<void>(`/projects/${projectId}`, { method: "DELETE" });
+}
+
 export function getBackendProject(projectId: string): Promise<BackendProject> {
   return apiRequest<BackendProject>(`/projects/${projectId}`);
 }
