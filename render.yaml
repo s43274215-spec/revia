@@ -70,6 +70,10 @@ services:
         value: "8"
       - key: OCR_WORKER_MAX_RSS_MB
         value: "300"
+      - key: OCR_WORKER_MAX_PAGES
+        value: "1"
+      - key: OCR_CONTAINER_MEMORY_BUDGET_MB
+        value: "480"
       - key: OCR_WORKER_THREADS
         value: "1"
       - key: OCR_WORKER_TIMEOUT_SECONDS

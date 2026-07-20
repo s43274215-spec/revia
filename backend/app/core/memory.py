@@ -31,6 +31,22 @@ def process_rss_mb(pid: int | None = None) -> float:
         return 0.0
 
 
+def container_memory_mb() -> float:
+    """Return current cgroup/container memory usage when Linux exposes it."""
+    candidates = (
+        Path("/sys/fs/cgroup/memory.current"),
+        Path("/sys/fs/cgroup/memory/memory.usage_in_bytes"),
+    )
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        try:
+            return int(candidate.read_text(encoding="ascii").strip()) / _MB
+        except (OSError, ValueError):
+            continue
+    return 0.0
+
+
 def log_ocr_memory(stage: str, page_number: int, initialized: bool, *, rss_mb: float | None = None) -> float:
     current = process_rss_mb() if rss_mb is None else rss_mb
     _LOGGER.info(

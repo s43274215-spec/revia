@@ -56,6 +56,8 @@ def build_document_processing_service(db: Session, settings: Settings) -> Docume
             minimum_text_length=settings.ocr_minimum_text_length,
             max_pages=settings.max_pdf_pages,
             ocr_worker_max_rss_mb=settings.ocr_worker_max_rss_mb,
+            ocr_worker_max_pages=settings.ocr_worker_max_pages,
+            ocr_container_memory_budget_mb=settings.ocr_container_memory_budget_mb,
             ocr_worker_threads=settings.ocr_worker_threads,
             ocr_worker_timeout_seconds=settings.ocr_worker_timeout_seconds,
         ),

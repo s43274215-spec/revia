@@ -472,6 +472,7 @@ class DocumentProcessingService:
                             self._db.commit()
                             raise
 
+                    used_ocr = extracted.extraction_method == ExtractionMethod.OCR
                     page_record.status = DocumentPageStatus.COMPLETED
                     page_record.extraction_method = extracted.extraction_method
                     page_record.extracted_text = extracted.text
@@ -482,13 +483,23 @@ class DocumentProcessingService:
                     document.failed_pages = self._count_pages(document.id, DocumentPageStatus.FAILED)
                     document.ocr_page_count = self._count_ocr_pages(document.id)
                     self._db.commit()
+                    if page_record in self._db:
+                        self._db.expunge(page_record)
+                    del page_record
                     del extracted
+                    if used_ocr:
+                        release_process_memory()
                     diagnostics.page_completed(page_number, total_pages)
                     if interrupt_after_page == page_number:
                         raise SimulatedInterruption(f"模拟在第 {page_number} 页后中断")
             finally:
                 if pdf is not None:
                     pdf.close()
+            # Never keep the OCR model resident while all page text is assembled
+            # into parsed pages and chunks. On 512 MB services that overlap alone
+            # can push an otherwise successful document over the container limit.
+            self._parser.close()
+            release_process_memory()
             return self._finalize_document(document_id, lease_owner, source_outline)
         except LeaseUnavailableError:
             raise
