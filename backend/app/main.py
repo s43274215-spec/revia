@@ -31,10 +31,13 @@ configure_ai_audit_log()
 
 logging.getLogger("revia.documents").info(
     "document_runtime ocr_enabled=%s ocr_dpi=%d ocr_worker_max_rss_mb=%d "
+    "ocr_worker_max_pages=%d ocr_container_memory_budget_mb=%d "
     "ocr_worker_threads=%d storage_backend=%s",
     settings.ocr_enabled,
     settings.ocr_dpi,
     settings.ocr_worker_max_rss_mb,
+    settings.ocr_worker_max_pages,
+    settings.ocr_container_memory_budget_mb,
     settings.ocr_worker_threads,
     settings.storage_backend,
 )

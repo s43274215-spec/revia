@@ -10,7 +10,7 @@ from multiprocessing import get_context
 from multiprocessing.connection import Connection
 from pathlib import Path
 
-from app.core.memory import log_ocr_memory, process_rss_mb
+from app.core.memory import container_memory_mb, log_ocr_memory, process_rss_mb
 
 
 _WORKER_LOGGER = logging.getLogger("revia.ocr.worker")
@@ -40,6 +40,7 @@ class OCRPageResult:
     page_rendered_rss_mb: float
     initialized: bool
     engine_version: str
+    container_peak_rss_mb: float = 0.0
 
 
 class RapidOCREngine:
@@ -68,14 +69,21 @@ class OCRWorkerClient:
         self,
         *,
         max_rss_mb: int = 300,
+        max_pages: int = 1,
+        container_memory_budget_mb: int = 480,
         threads: int = 1,
         timeout_seconds: int = 180,
     ) -> None:
+        if min(max_rss_mb, max_pages, container_memory_budget_mb, threads, timeout_seconds) <= 0:
+            raise ValueError("OCR worker limits must be positive")
         self._max_rss_mb = max_rss_mb
+        self._max_pages = max_pages
+        self._container_memory_budget_mb = container_memory_budget_mb
         self._threads = threads
         self._timeout_seconds = timeout_seconds
         self._connection: Connection | None = None
         self._process = None
+        self._processed_pages = 0
 
     @property
     def initialized(self) -> bool:
@@ -86,6 +94,7 @@ class OCRWorkerClient:
         assert self._connection is not None
         assert self._process is not None
         peak_rss = 0.0
+        container_peak_rss = 0.0
         last_stage = "worker_started"
         try:
             self._connection.send({
@@ -99,6 +108,7 @@ class OCRWorkerClient:
                 page_number,
                 reason="send_failed",
                 peak_rss=peak_rss,
+                container_peak_rss=container_peak_rss,
                 last_stage=last_stage,
                 broken_pipe=True,
                 cause=exc,
@@ -107,11 +117,24 @@ class OCRWorkerClient:
         deadline = time.monotonic() + self._timeout_seconds
         threshold_exceeded = False
         recycle_rss_mb = self._max_rss_mb * 0.9
+        recycle_container_mb = self._container_memory_budget_mb * 0.9
         payload: dict[str, object] | None = None
         while time.monotonic() < deadline:
             rss = process_rss_mb(self._process.pid)
             peak_rss = max(peak_rss, rss)
-            threshold_exceeded = threshold_exceeded or rss >= recycle_rss_mb
+            current_container_rss = container_memory_mb()
+            if current_container_rss <= 0:
+                current_container_rss = process_rss_mb() + rss
+            container_peak_rss = max(container_peak_rss, current_container_rss)
+            threshold_exceeded = threshold_exceeded or rss >= recycle_rss_mb or current_container_rss >= recycle_container_mb
+            if current_container_rss >= self._container_memory_budget_mb:
+                self._raise_resource_failure(
+                    page_number,
+                    reason="container_memory_limit",
+                    peak_rss=peak_rss,
+                    container_peak_rss=container_peak_rss,
+                    last_stage=last_stage,
+                )
             if self._connection.poll(0.1):
                 try:
                     received = self._connection.recv()
@@ -120,6 +143,7 @@ class OCRWorkerClient:
                         page_number,
                         reason="receive_failed",
                         peak_rss=peak_rss,
+                        container_peak_rss=container_peak_rss,
                         last_stage=last_stage,
                         broken_pipe=True,
                         cause=exc,
@@ -135,6 +159,7 @@ class OCRWorkerClient:
                     page_number,
                     reason="worker_exited",
                     peak_rss=peak_rss,
+                    container_peak_rss=container_peak_rss,
                     last_stage=last_stage,
                 )
         if payload is None:
@@ -142,6 +167,7 @@ class OCRWorkerClient:
                 page_number,
                 reason="timeout",
                 peak_rss=peak_rss,
+                container_peak_rss=container_peak_rss,
                 last_stage=last_stage,
                 timeout=True,
             )
@@ -152,6 +178,7 @@ class OCRWorkerClient:
             self.close(force=True)
             raise OCRWorkerError(error)
 
+        self._processed_pages += 1
         result = OCRPageResult(
             page_number=int(payload["page_number"]),
             text=str(payload.get("text") or ""),
@@ -163,8 +190,13 @@ class OCRWorkerClient:
             page_rendered_rss_mb=float(payload.get("render_rss_mb") or 0.0),
             initialized=bool(payload.get("initialized")),
             engine_version=str(payload.get("engine_version") or "unknown"),
+            container_peak_rss_mb=container_peak_rss,
         )
-        if threshold_exceeded or bool(payload.get("retire_after_page")):
+        if (
+            threshold_exceeded
+            or self._processed_pages >= self._max_pages
+            or bool(payload.get("retire_after_page"))
+        ):
             self.close()
         return result
 
@@ -174,6 +206,7 @@ class OCRWorkerClient:
         *,
         reason: str,
         peak_rss: float,
+        container_peak_rss: float,
         last_stage: str,
         timeout: bool = False,
         broken_pipe: bool = False,
@@ -185,7 +218,7 @@ class OCRWorkerClient:
         exit_code = process.exitcode if process is not None else None
         _WORKER_LOGGER.error(
             "ocr_worker_failure page=%d reason=%s exit_code=%s timeout=%s broken_pipe=%s "
-            "last_stage=%s peak_rss_mb=%.1f",
+            "last_stage=%s peak_rss_mb=%.1f container_peak_rss_mb=%.1f",
             page_number,
             reason,
             exit_code,
@@ -193,6 +226,7 @@ class OCRWorkerClient:
             str(broken_pipe).lower(),
             last_stage,
             peak_rss,
+            container_peak_rss,
         )
         self.close(force=True)
         error = OCRWorkerResourceError(f"OCR 子进程资源异常（reason={reason}）")
@@ -204,6 +238,7 @@ class OCRWorkerClient:
         connection, process = self._connection, self._process
         self._connection = None
         self._process = None
+        self._processed_pages = 0
         if connection is not None:
             if not force and process is not None and process.is_alive():
                 try:
@@ -237,6 +272,7 @@ class OCRWorkerClient:
         child_connection.close()
         self._connection = parent_connection
         self._process = process
+        self._processed_pages = 0
 
 
 def _rapidocr_worker(connection: Connection, max_rss_mb: int, threads: int) -> None:

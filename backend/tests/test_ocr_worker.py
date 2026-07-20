@@ -5,6 +5,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 import uuid
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
@@ -105,6 +106,107 @@ class OCRWorkerIsolationTests(unittest.TestCase):
             finally:
                 client.close()
 
+    def test_worker_retires_after_configured_page_budget(self) -> None:
+        client = OCRWorkerClient(
+            max_rss_mb=300,
+            max_pages=1,
+            container_memory_budget_mb=900,
+            threads=1,
+            timeout_seconds=180,
+        )
+
+        class RunningProcess:
+            pid = os.getpid()
+            exitcode = None
+
+            @staticmethod
+            def is_alive() -> bool:
+                return True
+
+        class ResultConnection:
+            @staticmethod
+            def send(message) -> None:
+                return None
+
+            @staticmethod
+            def poll(timeout=None) -> bool:
+                return True
+
+            @staticmethod
+            def recv():
+                return {
+                    "event": "result",
+                    "ok": True,
+                    "page_number": 1,
+                    "text": "page text",
+                    "character_count": 9,
+                    "rss_mb": 180.0,
+                    "baseline_rss_mb": 70.0,
+                    "engine_rss_mb": 160.0,
+                    "render_rss_mb": 170.0,
+                    "initialized": True,
+                    "engine_version": "test",
+                    "retire_after_page": False,
+                }
+
+        client._process = RunningProcess()
+        client._connection = ResultConnection()
+        client._ensure_started = lambda page_number: None
+        with (
+            patch("app.document.ocr.process_rss_mb", return_value=80.0),
+            patch("app.document.ocr.container_memory_mb", return_value=220.0),
+            patch.object(client, "close") as close,
+        ):
+            result = client.recognize_page(Path("private.pdf"), 1, 144)
+
+        self.assertEqual(result.text, "page text")
+        self.assertEqual(result.container_peak_rss_mb, 220.0)
+        close.assert_called_once_with()
+
+    def test_worker_stops_before_container_oom_limit(self) -> None:
+        client = OCRWorkerClient(
+            max_rss_mb=300,
+            max_pages=10,
+            container_memory_budget_mb=480,
+            threads=1,
+            timeout_seconds=180,
+        )
+
+        class RunningProcess:
+            pid = os.getpid()
+            exitcode = None
+
+            @staticmethod
+            def is_alive() -> bool:
+                return True
+
+        class WaitingConnection:
+            @staticmethod
+            def send(message) -> None:
+                return None
+
+            @staticmethod
+            def poll(timeout=None) -> bool:
+                return False
+
+        client._process = RunningProcess()
+        client._connection = WaitingConnection()
+        client._ensure_started = lambda page_number: None
+        with (
+            patch("app.document.ocr.process_rss_mb", return_value=280.0),
+            patch("app.document.ocr.container_memory_mb", return_value=481.0),
+            patch.object(client, "close") as close,
+            self.assertLogs("revia.ocr.worker", level="ERROR") as captured,
+        ):
+            with self.assertRaisesRegex(OCRWorkerResourceError, "container_memory_limit"):
+                client.recognize_page(Path("private.pdf"), 7, 144)
+
+        close.assert_called_once_with(force=True)
+        diagnostic = "\n".join(captured.output)
+        self.assertIn("reason=container_memory_limit", diagnostic)
+        self.assertIn("container_peak_rss_mb=481.0", diagnostic)
+        self.assertNotIn("private.pdf", diagnostic)
+
     def test_real_worker_isolated_memory_stays_below_render_budget(self) -> None:
         self.assertNotIn("rapidocr", sys.modules)
         self.assertNotIn("onnxruntime", sys.modules)
@@ -197,7 +299,7 @@ class OCRWorkerIsolationTests(unittest.TestCase):
         self.assertNotIn("private source path", diagnostic)
 
     def test_worker_timeout_log_is_distinguished_from_broken_pipe(self) -> None:
-        client = OCRWorkerClient(max_rss_mb=300, threads=1, timeout_seconds=0)
+        client = OCRWorkerClient(max_rss_mb=300, threads=1, timeout_seconds=1)
 
         class RunningProcess:
             pid = os.getpid()

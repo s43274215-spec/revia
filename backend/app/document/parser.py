@@ -77,6 +77,8 @@ class PDFParser:
         ocr_engine: "OCREngine | None" = None,
         ocr_worker: OCRWorkerClient | None = None,
         ocr_worker_max_rss_mb: int = 300,
+        ocr_worker_max_pages: int = 1,
+        ocr_container_memory_budget_mb: int = 480,
         ocr_worker_threads: int = 1,
         ocr_worker_timeout_seconds: int = 180,
     ) -> None:
@@ -87,6 +89,8 @@ class PDFParser:
         self._ocr_engine = ocr_engine
         self._ocr_worker = ocr_worker
         self._ocr_worker_max_rss_mb = ocr_worker_max_rss_mb
+        self._ocr_worker_max_pages = ocr_worker_max_pages
+        self._ocr_container_memory_budget_mb = ocr_container_memory_budget_mb
         self._ocr_worker_threads = ocr_worker_threads
         self._ocr_worker_timeout_seconds = ocr_worker_timeout_seconds
         self._ocr_version: str | None = None
@@ -273,6 +277,8 @@ class PDFParser:
         if self._ocr_worker is None:
             self._ocr_worker = OCRWorkerClient(
                 max_rss_mb=self._ocr_worker_max_rss_mb,
+                max_pages=self._ocr_worker_max_pages,
+                container_memory_budget_mb=self._ocr_container_memory_budget_mb,
                 threads=self._ocr_worker_threads,
                 timeout_seconds=self._ocr_worker_timeout_seconds,
             )
