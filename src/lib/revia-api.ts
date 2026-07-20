@@ -120,6 +120,17 @@ export function createProject(value: { name: string; description: string }): Pro
   });
 }
 
+export function updateProject(
+  projectId: string,
+  value: { name: string; description: string },
+): Promise<BackendProject> {
+  return apiRequest<BackendProject>(`/projects/${projectId}`, {
+    method: "PATCH",
+    headers: jsonHeaders,
+    body: JSON.stringify({ name: value.name, description: value.description || null }),
+  });
+}
+
 export function deleteProject(projectId: string): Promise<void> {
   return apiRequest<void>(`/projects/${projectId}`, { method: "DELETE" });
 }

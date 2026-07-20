@@ -1,7 +1,7 @@
 import type { ActiveDocument, BackendProject } from "./revia-api";
 
 export const PROJECT_CONTEXT_MENU_WIDTH = 176;
-export const PROJECT_CONTEXT_MENU_HEIGHT = 48;
+export const PROJECT_CONTEXT_MENU_HEIGHT = 88;
 
 export function projectDeletionConfirmation(projectName: string): string {
   return `确定永久删除“${projectName}”吗？\n\n相关资料、复习内容和正在运行的任务都会一并删除。删除后无法恢复。`;

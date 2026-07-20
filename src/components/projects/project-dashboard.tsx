@@ -3,8 +3,9 @@
 import { MouseEvent as ReactMouseEvent, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Icon } from "@/components/learning/icons";
-import { ActiveDocument, activeDocumentStatusLabel, BackendProject, cancelDocument, createProject, deleteProject, getActiveDocument, listProjects } from "@/lib/revia-api";
+import { ActiveDocument, activeDocumentStatusLabel, BackendProject, cancelDocument, createProject, deleteProject, getActiveDocument, listProjects, updateProject } from "@/lib/revia-api";
 import { CreateProjectDialog } from "./create-project-dialog";
+import { EditProjectDialog } from "./edit-project-dialog";
 import { SettingsTrigger } from "@/components/settings/settings-trigger";
 import { useAuth } from "@/components/auth/auth-provider";
 import {
@@ -13,6 +14,7 @@ import {
   projectDeletionConfirmation,
   removeDeletedProject,
 } from "@/lib/project-deletion";
+import { replaceUpdatedProject, type ProjectEditValue } from "@/lib/project-editing";
 
 const dateFormatter = new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "long", day: "numeric" });
 const statusLabels: Record<BackendProject["status"], string> = {
@@ -42,6 +44,7 @@ export function ProjectDashboard() {
   const [error, setError] = useState<string | null>(null);
   const [cancellingDocumentId, setCancellingDocumentId] = useState<string | null>(null);
   const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
+  const [editingProject, setEditingProject] = useState<BackendProject | null>(null);
   const [projectMenu, setProjectMenu] = useState<ProjectMenuState | null>(null);
   const projectMenuRef = useRef<HTMLDivElement | null>(null);
 
@@ -151,6 +154,20 @@ export function ProjectDashboard() {
     }
   };
 
+  const editProject = async (projectId: string, value: ProjectEditValue) => {
+    setError(null);
+    const updated = await updateProject(projectId, value);
+    const next = replaceUpdatedProject(projects, activeDocument, updated);
+    setProjects(next.projects);
+    setActiveDocument(next.activeDocument);
+    setEditingProject(null);
+  };
+
+  const openProjectEditor = (project: BackendProject) => {
+    setProjectMenu(null);
+    setEditingProject(project);
+  };
+
   const openProjectMenuAt = (projectId: string, clientX: number, clientY: number) => {
     const position = clampProjectContextMenuPosition(
       clientX,
@@ -251,6 +268,13 @@ export function ProjectDashboard() {
       >
         <button
           type="button"
+          role="menuitem"
+          disabled={deletingProjectId !== null}
+          onClick={() => openProjectEditor(contextProject)}
+        >编辑项目</button>
+        <div className="project-context-menu-separator" role="separator" />
+        <button
+          type="button"
           className="danger"
           role="menuitem"
           disabled={deletingProjectId !== null}
@@ -258,6 +282,12 @@ export function ProjectDashboard() {
         >{deletingProjectId === contextProject.id ? "正在删除…" : "删除项目"}</button>
       </div>}
       <CreateProjectDialog open={dialogOpen} onClose={() => setDialogOpen(false)} onConfirm={create} />
+      {editingProject && <EditProjectDialog
+        key={`${editingProject.id}:${editingProject.updated_at}`}
+        project={editingProject}
+        onClose={() => setEditingProject(null)}
+        onConfirm={editProject}
+      />}
     </main>
   );
 }
