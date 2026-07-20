@@ -1,13 +1,18 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { MouseEvent as ReactMouseEvent, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Icon } from "@/components/learning/icons";
 import { ActiveDocument, activeDocumentStatusLabel, BackendProject, cancelDocument, createProject, deleteProject, getActiveDocument, listProjects } from "@/lib/revia-api";
 import { CreateProjectDialog } from "./create-project-dialog";
 import { SettingsTrigger } from "@/components/settings/settings-trigger";
 import { useAuth } from "@/components/auth/auth-provider";
-import { projectDeletionConfirmation, removeDeletedProject } from "@/lib/project-deletion";
+import {
+  clampProjectContextMenuPosition,
+  PROJECT_CONTEXT_MENU_WIDTH,
+  projectDeletionConfirmation,
+  removeDeletedProject,
+} from "@/lib/project-deletion";
 
 const dateFormatter = new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "long", day: "numeric" });
 const statusLabels: Record<BackendProject["status"], string> = {
@@ -15,6 +20,12 @@ const statusLabels: Record<BackendProject["status"], string> = {
   processing: "处理中",
   completed: "已完成",
   failed: "处理失败",
+};
+
+type ProjectMenuState = {
+  projectId: string;
+  x: number;
+  y: number;
 };
 
 function loadDashboardData(): Promise<[BackendProject[], ActiveDocument | null]> {
@@ -31,6 +42,8 @@ export function ProjectDashboard() {
   const [error, setError] = useState<string | null>(null);
   const [cancellingDocumentId, setCancellingDocumentId] = useState<string | null>(null);
   const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
+  const [projectMenu, setProjectMenu] = useState<ProjectMenuState | null>(null);
+  const projectMenuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -52,6 +65,35 @@ export function ProjectDashboard() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!projectMenu) return;
+
+    const closeMenu = () => setProjectMenu(null);
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (projectMenuRef.current?.contains(target)) return;
+      if (target instanceof Element && target.closest("[data-project-menu-trigger]")) return;
+      closeMenu();
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeMenu();
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("resize", closeMenu);
+    window.addEventListener("scroll", closeMenu, true);
+    requestAnimationFrame(() => projectMenuRef.current?.querySelector<HTMLButtonElement>("button")?.focus());
+
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("resize", closeMenu);
+      window.removeEventListener("scroll", closeMenu, true);
+    };
+  }, [projectMenu]);
+
   const openProject = (project: BackendProject) => {
     if (isDemo && project.status !== "completed") {
       setError("演示模式只能浏览已准备好的学习材料，不会上传、解析或重新生成内容。");
@@ -59,6 +101,7 @@ export function ProjectDashboard() {
     }
     router.push(project.status === "completed" ? `/projects/${project.id}/learn` : `/projects/${project.id}/upload`);
   };
+
   const create = async (value: { name: string; description: string }) => {
     try {
       setError(null);
@@ -92,6 +135,7 @@ export function ProjectDashboard() {
   };
 
   const removeProject = async (project: BackendProject) => {
+    setProjectMenu(null);
     if (!window.confirm(projectDeletionConfirmation(project.name))) return;
     setDeletingProjectId(project.id);
     setError(null);
@@ -106,6 +150,36 @@ export function ProjectDashboard() {
       setDeletingProjectId(null);
     }
   };
+
+  const openProjectMenuAt = (projectId: string, clientX: number, clientY: number) => {
+    const position = clampProjectContextMenuPosition(
+      clientX,
+      clientY,
+      window.innerWidth,
+      window.innerHeight,
+    );
+    setProjectMenu({ projectId, ...position });
+  };
+
+  const openProjectContextMenu = (event: ReactMouseEvent<HTMLDivElement>, project: BackendProject) => {
+    if (isDemo) return;
+    event.preventDefault();
+    openProjectMenuAt(project.id, event.clientX, event.clientY);
+  };
+
+  const toggleTouchProjectMenu = (event: ReactMouseEvent<HTMLButtonElement>, project: BackendProject) => {
+    event.stopPropagation();
+    if (projectMenu?.projectId === project.id) {
+      setProjectMenu(null);
+      return;
+    }
+    const rect = event.currentTarget.getBoundingClientRect();
+    openProjectMenuAt(project.id, rect.right - PROJECT_CONTEXT_MENU_WIDTH, rect.bottom + 6);
+  };
+
+  const contextProject = projectMenu
+    ? projects.find((project) => project.id === projectMenu.projectId) ?? null
+    : null;
 
   return (
     <main className="entry-page">
@@ -139,23 +213,50 @@ export function ProjectDashboard() {
           <div className="project-table-header"><span>课程名称</span><span>创建时间</span><span>当前状态</span><span /></div>
           {error && <div className="project-row"><span className="project-course"><span><strong>无法连接后端</strong><small>{error}</small></span></span></div>}
           {projects.map((project) => (
-            <div className="project-row" key={project.id}>
+            <div
+              className="project-row project-row-with-menu"
+              key={project.id}
+              title={isDemo ? undefined : "右键打开项目操作"}
+              onContextMenu={(event) => openProjectContextMenu(event, project)}
+            >
               <span className="project-course"><i>{project.name.slice(0, 1)}</i><span><strong>{project.name}</strong><small>{project.description || "暂无课程描述"}</small></span></span>
               <span>{dateFormatter.format(new Date(project.created_at))}</span>
               <span><em className={`project-status ${project.status}`}>{statusLabels[project.status]}</em></span>
               <span className="project-actions">
                 {!isDemo && <button
                   type="button"
-                  className="project-delete"
+                  className="project-more"
+                  data-project-menu-trigger
+                  aria-label={`更多项目操作：${project.name}`}
+                  aria-haspopup="menu"
+                  aria-expanded={projectMenu?.projectId === project.id}
                   disabled={deletingProjectId !== null}
-                  onClick={() => void removeProject(project)}
-                >{deletingProjectId === project.id ? "正在删除…" : "删除"}</button>}
+                  onClick={(event) => toggleTouchProjectMenu(event, project)}
+                ><span aria-hidden="true">···</span></button>}
                 <button type="button" className="project-enter" disabled={deletingProjectId === project.id} onClick={() => openProject(project)}>进入项目&nbsp; →</button>
               </span>
             </div>
           ))}
         </div>
       </section>
+      {contextProject && projectMenu && !isDemo && <div
+        ref={projectMenuRef}
+        className="project-context-menu"
+        style={{ left: projectMenu.x, top: projectMenu.y }}
+        role="menu"
+        aria-label={`项目操作：${contextProject.name}`}
+        data-project-context-menu
+        onClick={(event) => event.stopPropagation()}
+        onContextMenu={(event) => event.preventDefault()}
+      >
+        <button
+          type="button"
+          className="danger"
+          role="menuitem"
+          disabled={deletingProjectId !== null}
+          onClick={() => void removeProject(contextProject)}
+        >{deletingProjectId === contextProject.id ? "正在删除…" : "删除项目"}</button>
+      </div>}
       <CreateProjectDialog open={dialogOpen} onClose={() => setDialogOpen(false)} onConfirm={create} />
     </main>
   );

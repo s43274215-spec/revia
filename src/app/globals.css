@@ -213,12 +213,20 @@ mark { padding:1px 2px; background:#dfe9e3; color:inherit; }
 .project-status.completed::before { background:#789486; }
 .project-status.processing { color:#78694e; }
 .project-status.processing::before { background:#a88f5d; }
+.project-row-with-menu { position:relative; }
 .project-actions { display:flex; align-items:center; justify-content:flex-end; gap:14px; }
 .project-actions button { padding:0; border:0; background:transparent; font:inherit; cursor:pointer; }
 .project-actions .project-enter { color:#90938d; }
-.project-actions .project-delete { color:#9b5f55; }
 .project-actions button:hover { color:var(--accent); }
 .project-actions button:disabled { opacity:.5; cursor:wait; }
+.project-more { display:none; place-items:center; width:28px; height:28px; border:1px solid var(--line)!important; border-radius:7px; background:#fff!important; color:#777b75; font-size:16px!important; letter-spacing:1px; }
+.project-more:hover { border-color:#c9d3cc!important; background:#f7f8f6!important; }
+.project-context-menu { position:fixed; z-index:70; width:176px; padding:6px; border:1px solid var(--line); border-radius:8px; background:#fff; box-shadow:0 12px 30px rgba(42,45,41,.15); font-size:12px; }
+.project-context-menu button { display:flex; width:100%; padding:9px 10px; border:0; border-radius:5px; background:transparent; color:var(--ink); text-align:left; cursor:pointer; }
+.project-context-menu button:hover { background:var(--warm); }
+.project-context-menu button.danger { color:#9b554e; }
+.project-context-menu button:disabled { color:#aaa; cursor:wait; }
+.project-context-menu button:disabled:hover { background:transparent; }
 .active-task-actions { display:flex; align-items:center; justify-content:flex-end; gap:12px; }
 .active-task-actions button { padding:0; border:0; background:transparent; color:#90938d; font:inherit; cursor:pointer; }
 .active-task-actions button:hover { color:var(--accent); }
@@ -297,7 +305,8 @@ mark { padding:1px 2px; background:#dfe9e3; color:inherit; }
 .missing-project button { padding:8px 12px; border:1px solid var(--line); border-radius:6px; background:#fff; cursor:pointer; }
 @keyframes spin { to { transform:rotate(360deg); } }
 @media (max-width:800px) { .entry-header { padding:0 22px; } .project-home { width:calc(100% - 36px); padding-top:42px; } .project-table-header { display:none; } .project-row { grid-template-columns:1fr auto; row-gap:8px; padding:18px 10px; } .project-row>span:nth-child(2),.project-row>span:nth-child(3) { grid-column:1; padding-left:49px; } .project-actions,.project-arrow { grid-column:2; grid-row:1 / 4; }
-.project-actions { flex-direction:column-reverse; align-items:flex-end; gap:8px; } .upload-content { width:calc(100% - 36px); } .upload-section { grid-template-columns:1fr; gap:20px; } .syllabus-grid { grid-template-columns:1fr; } }
+.project-actions { flex-direction:row; align-items:center; gap:16px; } .upload-content { width:calc(100% - 36px); } .upload-section { grid-template-columns:1fr; gap:20px; } .syllabus-grid { grid-template-columns:1fr; } }
+@media (hover:none),(pointer:coarse) { .project-more { display:grid; } }
 
 /* Global DeepSeek settings */
 .settings-trigger { display:flex; align-items:center; gap:8px; border:0; background:transparent; color:#747873; cursor:pointer; }
