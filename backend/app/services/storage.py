@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import tempfile
 import time
@@ -12,6 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncIterator, Protocol
 from urllib.parse import urlencode
+
+
+_LOGGER = logging.getLogger("revia.storage")
 
 
 class StorageError(RuntimeError):
@@ -301,9 +305,26 @@ class S3StorageProvider:
             path.unlink(missing_ok=True)
             if self._is_not_found(exc):
                 raise StorageNotFoundError("原始 PDF 已不存在，无法继续解析") from exc
-            code = self._safe_error_code(exc)
+            details = self._safe_error_details(exc)
+            client_meta = getattr(self._client, "meta", None)
+            client_config = getattr(client_meta, "config", None)
+            s3_config = getattr(client_config, "s3", None) or {}
+            _LOGGER.exception(
+                "s3_download_failed bucket=%s key_tail=%s endpoint=%s region=%s "
+                "addressing_style=%s code=%s message=%s status=%s request_id=%s host_id=%s",
+                self._bucket,
+                object_key.rsplit("/", 1)[-1],
+                getattr(client_meta, "endpoint_url", "unknown"),
+                getattr(client_meta, "region_name", "unknown"),
+                s3_config.get("addressing_style", "unknown"),
+                details["code"],
+                details["message"],
+                details["status"],
+                details["request_id"],
+                details["host_id"],
+            )
             raise StorageUnavailableError(
-                f"对象存储下载暂时失败（{code}），请稍后继续识别"
+                f"对象存储下载暂时失败（{details['code']}），请稍后继续识别"
             ) from exc
         finally:
             close = getattr(body, "close", None)
@@ -341,12 +362,28 @@ class S3StorageProvider:
         return code in {"404", "NoSuchKey", "NotFound"}
 
     @staticmethod
-    def _safe_error_code(exc: Exception) -> str:
+    def _safe_error_details(exc: Exception) -> dict[str, str]:
         response = getattr(exc, "response", {})
-        code = str(response.get("Error", {}).get("Code", "")).strip()
-        if code:
-            return code[:80]
-        return exc.__class__.__name__[:80]
+        error = response.get("Error", {}) if isinstance(response, dict) else {}
+        metadata = response.get("ResponseMetadata", {}) if isinstance(response, dict) else {}
+
+        code = str(error.get("Code", "")).strip() or exc.__class__.__name__
+        message = str(error.get("Message", "")).strip() or str(exc).strip() or "unknown"
+        status = str(metadata.get("HTTPStatusCode", "")).strip() or "unknown"
+        request_id = str(metadata.get("RequestId", "")).strip() or "unknown"
+        host_id = str(metadata.get("HostId", "")).strip() or "unknown"
+
+        return {
+            "code": code[:80],
+            "message": message[:300],
+            "status": status[:20],
+            "request_id": request_id[:160],
+            "host_id": host_id[:300],
+        }
+
+    @classmethod
+    def _safe_error_code(cls, exc: Exception) -> str:
+        return cls._safe_error_details(exc)["code"]
 
 
 def build_storage_provider(settings: object) -> StorageProvider:

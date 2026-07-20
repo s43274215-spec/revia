@@ -90,6 +90,17 @@ class FakeS3ForbiddenError(RuntimeError):
     response = {"Error": {"Code": "403"}}
 
 
+class FakeDetailedS3AccessDeniedError(RuntimeError):
+    response = {
+        "Error": {"Code": "AccessDenied", "Message": "application key is not authorized"},
+        "ResponseMetadata": {
+            "HTTPStatusCode": 403,
+            "RequestId": "request-123",
+            "HostId": "host-456",
+        },
+    }
+
+
 def build_text_pdf(page_count: int) -> bytes:
     pdf = fitz.open()
     for page_number in range(1, page_count + 1):
@@ -430,6 +441,28 @@ class LongPDFResumeTests(unittest.TestCase):
         with self.assertRaisesRegex(StorageUnavailableError, "RequestTimeout") as captured:
             s3.download_to_temp(object_key)
         self.assertNotIn(object_key, str(captured.exception))
+
+
+    def test_s3_download_logs_safe_provider_error_details(self) -> None:
+        object_key = build_object_key(self.workspace_id, uuid.uuid4())
+        client = FakeS3Client({object_key: b"pdf"})
+        client.get_error = FakeDetailedS3AccessDeniedError("provider detail")
+        s3 = S3StorageProvider.__new__(S3StorageProvider)
+        s3._client = client
+        s3._bucket = "private-revia"
+        s3._temp_root = Path(self.storage_directory.name)
+
+        with self.assertLogs("revia.storage", level="ERROR") as captured:
+            with self.assertRaisesRegex(StorageUnavailableError, "AccessDenied"):
+                s3.download_to_temp(object_key)
+
+        logs = "\n".join(captured.output)
+        self.assertIn("code=AccessDenied", logs)
+        self.assertIn("message=application key is not authorized", logs)
+        self.assertIn("status=403", logs)
+        self.assertIn("request_id=request-123", logs)
+        self.assertIn("host_id=host-456", logs)
+        self.assertNotIn("workspaces/", logs)
 
     def test_failed_document_can_requeue_and_resume_from_saved_pages(self) -> None:
         document_id = self._document(3)
