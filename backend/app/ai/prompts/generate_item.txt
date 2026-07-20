@@ -11,7 +11,7 @@ SOURCE_CONTEXT_JSON_END
 一次调用完成当前考纲条目的三个版本，不得拆分调用。
 
 标题规则：
-1. knowledge_point_title 只写当前知识主题，bullet_points[].title 只写当前子要点，均应简洁且不超过 25 个汉字。
+1. knowledge_point_title 只写当前知识主题，bullet_points[].title 只写当前子要点，均应尽量简洁，通常建议不超过 25 个汉字；为保留准确含义确有需要时允许更长，但不得超过 200 个字符。
 2. 子要点标题不得包含完整的 knowledge_point_title，不得拼接 Chapter 或父级标题。
 3. 第一章、第一节、一、（一）等编号仅在原资料明确出现时保留一个层级，不得组合或重复添加。
 4. bullet_points[].title 是唯一规范子标题；original.title、recitation.title、keywords.title 必须逐字复制该标题。

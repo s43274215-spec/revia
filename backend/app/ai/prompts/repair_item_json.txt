@@ -13,7 +13,7 @@ SOURCE_CONTEXT_JSON_END
 只修复 JSON 语法、字段结构和上方列出的具体校验错误，不得添加、删减或改写原有内容事实。逐条修复 validation_error 指出的字段路径；不要笼统重写整个答案。允许缩短重复标题、统一三个版本标题、删除纯 OCR 噪声、统一关键词分隔符、去除空关键词和完全重复关键词、去重 source_pages。不得为了满足建议字数或关键词数量删掉有效内容。集合类主题若把多个带编号分项塞进一个 content，必须按分项拆成多个 bullet_points，并让每个 bullet 保留支持自己的来源。不要解释，严格输出修复后的单个 JSON 对象。
 目标结构必须且只能包含：knowledge_point_title；bullet_points 数组；每个要点包含 title、original、recitation、keywords、source_chunk_ids、source_pages；三个版本分别只包含 title 与 content。
 
-标题不得为空或超过 25 个汉字；子标题不得包含完整父标题；bullet title 与三个版本 title 必须完全相同；keywords 可为 1—50 个有效关键词或短语，去除空项和完全重复项即可。
+标题不得为空，通常建议不超过 25 个汉字；为保留准确含义确有需要时允许更长，但不得超过 200 个字符；子标题不得包含完整父标题；bullet title 与三个版本 title 必须完全相同；keywords 可为 1—50 个有效关键词或短语，去除空项和完全重复项即可。
 
 待修复内容：
 {raw_output}

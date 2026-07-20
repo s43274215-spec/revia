@@ -12,6 +12,7 @@ from app.ai.schemas import (
     KEYWORDS_RECOMMENDED_MIN_ITEMS,
     ORIGINAL_RECOMMENDED_LENGTH,
     RECITATION_RECOMMENDED_LENGTH,
+    TITLE_RECOMMENDED_MAX_LENGTH,
 )
 
 logger = logging.getLogger("revia.ai.validation")
@@ -166,6 +167,13 @@ def normalize_generated_item_payload(payload: object, *, fallback_title: str | N
 
 
 def _log_soft_format_warnings(result: GeneratedItemResult) -> None:
+    if len(result.knowledge_point_title) > TITLE_RECOMMENDED_MAX_LENGTH:
+        logger.warning(
+            "AI item accepted with soft format warning knowledge title length=%d exceeds recommended %d: %s",
+            len(result.knowledge_point_title),
+            TITLE_RECOMMENDED_MAX_LENGTH,
+            result.knowledge_point_title,
+        )
     for bullet_index, bullet in enumerate(result.bullet_points):
         keyword_count = len([
             item
@@ -173,6 +181,10 @@ def _log_soft_format_warnings(result: GeneratedItemResult) -> None:
             if item.strip()
         ])
         warnings: list[str] = []
+        if len(bullet.title) > TITLE_RECOMMENDED_MAX_LENGTH:
+            warnings.append(
+                f"title length {len(bullet.title)} exceeds recommended {TITLE_RECOMMENDED_MAX_LENGTH}"
+            )
         if len(bullet.original.content) > ORIGINAL_RECOMMENDED_LENGTH:
             warnings.append(
                 f"original length {len(bullet.original.content)} exceeds recommended {ORIGINAL_RECOMMENDED_LENGTH}"

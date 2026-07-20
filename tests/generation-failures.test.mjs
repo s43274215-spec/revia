@@ -15,6 +15,11 @@ const schema = {
   syllabus_item: "人力资源规划",
   reason: "AI output does not match schema: String should have at most 800 characters",
 };
+const longTitleSchema = {
+  syllabus_item: "科学社会主义的基本原则",
+  failure_type: "schema_validation",
+  reason: "AI output failed schema validation after one structure-repair retry: AI output does not match the three-version item schema: bullet_points.3.title: String should have at most 25 characters; bullet_points.3.original.title: String should have at most 25 characters",
+};
 
 test("legacy generation failures are classified from their stored reasons", () => {
   assert.equal(generationFailureKind(unmatched), "unmatched");
@@ -29,6 +34,10 @@ test("legacy generation failures are classified from their stored reasons", () =
 test("internal validation errors become readable failure reasons", () => {
   assert.equal(generationFailureReason(unmatched), "课程资料中没有找到达到相关性要求的内容。");
   assert.equal(generationFailureReason(schema), "生成的原文内容超过 800 字的长度限制。");
+  assert.equal(
+    generationFailureReason(longTitleSchema),
+    "第 4 个小标题超过旧的 25 字排版建议；修复后不会再因此丢弃有效内容。",
+  );
 });
 
 test("job success count prefers the durable backend count", () => {

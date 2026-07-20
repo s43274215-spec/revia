@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from app.models.enums import ContentVersionKind
 from app.services.content_organization import (
+    build_reliable_source_chapter_index,
     canonical_learning_material,
     is_displayable_source_chapter,
     normalize_content_title,
@@ -93,7 +94,7 @@ class ContentOrganizationTests(unittest.TestCase):
         self.assertEqual([item.versions[0].title for item in by_title["宽泛知识点"].bullet_points], ["其他内容"])
 
     def test_chapter_visibility_is_conservative_and_topic_specific(self) -> None:
-        for title in ("未分章", "未归类内容", "人力.pdf · 第 1–292 页", "第 1–292 页", "第二章节", "第三章", "题纲父标题"):
+        for title in ("未分章", "未归类内容", "人力.pdf · 第 1–292 页", "第 1–292 页", "第二章节", "第三章", "题纲父标题", "第一章世界的物质性及发展规律/ 25"):
             self.assertFalse(is_displayable_source_chapter(title), title)
         for title in ("第八章 员工关系管理", "第三章 工作分析", "招聘与甄选"):
             self.assertTrue(is_displayable_source_chapter(title), title)
@@ -111,6 +112,74 @@ class ContentOrganizationTests(unittest.TestCase):
             page_start=8, page_end=8, text="第六章 绩效管理",
         )
         self.assertIsNone(resolve_source_chapter_title([candidate], [candidate.chunk_id]))
+
+    def test_real_textbook_body_boundaries_classify_middle_chapter_chunks(self) -> None:
+        toc_one = SimpleNamespace(
+            id=uuid.uuid4(), position=0, page_start=5, page_end=5,
+            chapter_title="第一章世界的物质性及发展规律/ 25",
+            content="第一章世界的物质性及发展规律/ 25",
+        )
+        toc_two = SimpleNamespace(
+            id=uuid.uuid4(), position=1, page_start=6, page_end=6,
+            chapter_title="第二章实践与认识及其发展规律/ 69",
+            content="第二章实践与认识及其发展规律/ 69",
+        )
+        first_heading = SimpleNamespace(
+            id=uuid.uuid4(), position=10, page_start=33, page_end=34,
+            chapter_title="第一章世界的物质性及发展规律",
+            content="第一章世界的物质性及发展规律\n学习目标与本章正文内容足够长，用于确认这是真实正文首页而不是目录。",
+        )
+        first_middle = SimpleNamespace(
+            id=uuid.uuid4(), position=11, page_start=40, page_end=41,
+            chapter_title="第一章世界的物质性及发展规律",
+            content="本章中间正文不会重复印刷完整章名，但仍然属于第一章。",
+        )
+        second_heading = SimpleNamespace(
+            id=uuid.uuid4(), position=20, page_start=77, page_end=78,
+            chapter_title="第二章实践与认识及其发展规律",
+            content="第二章实践与认识及其发展规律\n学习目标与本章正文内容足够长，用于确认第二章真实正文边界。",
+        )
+        second_middle = SimpleNamespace(
+            id=uuid.uuid4(), position=21, page_start=90, page_end=91,
+            chapter_title="第二章实践与认识及其发展规律",
+            content="实践与认识的中间正文内容，不需要再次重复章名。",
+        )
+        index = build_reliable_source_chapter_index([
+            toc_one, toc_two, first_heading, first_middle, second_heading, second_middle,
+        ])
+        self.assertNotIn(toc_one.id, index)
+        self.assertEqual(index[first_middle.id], "第一章世界的物质性及发展规律")
+        self.assertEqual(index[second_middle.id], "第二章实践与认识及其发展规律")
+
+        candidate = SimpleNamespace(
+            chunk_id=second_middle.id,
+            chapter=second_middle.chapter_title,
+            score=0.94,
+            page_start=90,
+            page_end=91,
+            text=second_middle.content,
+        )
+        self.assertIsNone(resolve_source_chapter_title([candidate], [candidate.chunk_id]))
+        self.assertEqual(
+            resolve_source_chapter_title([candidate], [candidate.chunk_id], index),
+            "第二章实践与认识及其发展规律",
+        )
+
+    def test_toc_propagation_does_not_create_a_reliable_body_boundary(self) -> None:
+        toc = SimpleNamespace(
+            id=uuid.uuid4(), position=0, page_start=8, page_end=8,
+            chapter_title="第八章员工关系管理",
+            content=(
+                "第八章员工关系管理\n"
+                "第一章人力资源管理概述\n第二章工作分析\n第三章招聘与甄选"
+            ),
+        )
+        propagated = SimpleNamespace(
+            id=uuid.uuid4(), position=1, page_start=100, page_end=101,
+            chapter_title="第八章员工关系管理",
+            content="普通正文内容，章名只是由目录最后一项错误向后传播。",
+        )
+        self.assertEqual(build_reliable_source_chapter_index([toc, propagated]), {})
 
 
 if __name__ == "__main__":

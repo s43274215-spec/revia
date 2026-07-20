@@ -30,8 +30,16 @@ export function generationFailureReason(failure: GenerationItemFailure): string 
   if (reason.includes("at most 800 characters")) {
     return "生成的原文内容超过 800 字的长度限制。";
   }
+  const longBulletTitle = failure.reason.match(/bullet_points\.(\d+)\.(?:title|(?:original|recitation|keywords)\.title):[^;]*(?:at most 25|not exceed 25)/i);
+  if (longBulletTitle) {
+    return `第 ${Number(longBulletTitle[1]) + 1} 个小标题超过旧的 25 字排版建议；修复后不会再因此丢弃有效内容。`;
+  }
   if (generationFailureKind(failure) === "schema_validation") {
-    return "生成内容在自动修复后仍未通过格式检查。";
+    const details = failure.reason.match(/three-version item schema:\s*(.+)$/i)?.[1]?.trim();
+    if (details) {
+      return `生成内容在自动修复后仍未通过结构检查：${details}`;
+    }
+    return "生成内容在自动修复后仍未通过结构检查，后台未保存可安全使用的结果。";
   }
   return "生成服务未能完成这个考点。";
 }

@@ -31,8 +31,11 @@ _NUMBER_PREFIX = re.compile(r"^\s*(?:\(?\d+\)?\s*[.、,:：;；)）-]|第\s*\d+\
 _WHITESPACE = re.compile(r"\s+")
 _PAGE_RANGE = re.compile(r"(?:^|[·•|｜])?\s*第?\s*\d+\s*(?:[-~至]\s*\d+\s*)?页\s*$", re.IGNORECASE)
 _FILE_PAGE_RANGE = re.compile(r"\.(?:pdf|docx?|pptx?|txt)\s*(?:[·•|｜-]\s*)?第?\s*\d+", re.IGNORECASE)
+_TOC_TRAILING_PAGE_REFERENCE = re.compile(r"\s*[/／]\s*\d+\s*$")
 _BARE_CHAPTER_NUMBER = re.compile(r"^第\s*[一二三四五六七八九十百零〇\d]+\s*(?:章|章节|节|篇)$")
 _ONLY_NUMBERING = re.compile(r"^[一二三四五六七八九十百零〇\d\s.、()（）-]+$")
+_NUMBERED_CHAPTER = re.compile(r"^第\s*([一二三四五六七八九十百零〇\d]+)\s*章")
+_CHAPTER_LINE = re.compile(r"^\s*第\s*[一二三四五六七八九十百零〇\d]+\s*章(?:\s+|[：:、.．\-—–])?.+")
 _HIDDEN_CHAPTERS = {
     "未分章", "未归类内容", "未分类", "未分类内容", "其他", "其它",
     "题纲父标题", "提纲父标题", "大纲父标题", "目录", "课程目录", "contents",
@@ -59,6 +62,15 @@ class CrossLevelCollisionAction:
     bullet_index: int
     target_index: int
     merge_into_target: bool
+
+
+@dataclass(frozen=True)
+class SourceChapterBoundary:
+    title: str
+    start_position: int
+    start_page: int
+    chapter_number: int | None
+    body_characters: int
 
 
 def normalize_content_title(value: str) -> str:
@@ -122,16 +134,83 @@ def is_displayable_source_chapter(
         return False
     if _PAGE_RANGE.search(value) or _FILE_PAGE_RANGE.search(value):
         return False
+    if _TOC_TRAILING_PAGE_REFERENCE.search(value):
+        return False
     if _BARE_CHAPTER_NUMBER.fullmatch(value) or _ONLY_NUMBERING.fullmatch(value):
         return False
     return bool(re.search(r"[A-Za-z\u4e00-\u9fff]", value))
 
 
-def resolve_source_chapter_title(candidates: Iterable[Any], cited_ids: Iterable[uuid.UUID]) -> str | None:
-    """Resolve only a concrete chapter heading confirmed by its cited chunk text."""
+def build_reliable_source_chapter_index(chunks: Iterable[Any]) -> dict[uuid.UUID, str]:
+    """Map every chunk in a reliably detected textbook chapter range to its concrete chapter title.
+
+    A boundary must be confirmed by a real body heading, not merely by a propagated
+    title or a table-of-contents entry. When a document contains both a compact TOC
+    chapter sequence and a later body sequence, the widest coherent body run wins.
+    """
+    ordered = sorted(chunks, key=lambda item: int(getattr(item, "position", 0)))
+    candidates: list[SourceChapterBoundary] = []
+    for chunk in ordered:
+        title = _WHITESPACE.sub(" ", getattr(chunk, "chapter_title", None) or "").strip()
+        if not is_displayable_source_chapter(title):
+            continue
+        if not _chunk_confirms_heading(title, chunk) or _chunk_looks_like_toc(chunk):
+            continue
+        candidates.append(SourceChapterBoundary(
+            title=title,
+            start_position=int(getattr(chunk, "position", 0)),
+            start_page=int(getattr(chunk, "page_start", 0)),
+            chapter_number=_chapter_number(title),
+            body_characters=_heading_body_characters(title, chunk),
+        ))
+    boundaries = _best_boundary_run(candidates)
+    if not boundaries:
+        return {}
+
+    result: dict[uuid.UUID, str] = {}
+    boundary_index = 0
+    current: SourceChapterBoundary | None = None
+    for chunk in ordered:
+        position = int(getattr(chunk, "position", 0))
+        while boundary_index < len(boundaries) and position >= boundaries[boundary_index].start_position:
+            current = boundaries[boundary_index]
+            boundary_index += 1
+        if current is None:
+            continue
+        chunk_id = getattr(chunk, "id", None) or getattr(chunk, "chunk_id", None)
+        if isinstance(chunk_id, uuid.UUID):
+            result[chunk_id] = current.title
+    return result
+
+
+def resolve_source_chapter_title(
+    candidates: Iterable[Any],
+    cited_ids: Iterable[uuid.UUID],
+    reliable_chapter_by_chunk_id: dict[uuid.UUID, str] | None = None,
+) -> str | None:
+    """Resolve a concrete chapter from reliable body boundaries or direct heading evidence."""
     cited = Counter(cited_ids)
+    candidate_list = list(candidates)
+    if reliable_chapter_by_chunk_id:
+        boundary_votes: Counter[str] = Counter()
+        boundary_scores: dict[str, float] = defaultdict(float)
+        boundary_pages: dict[str, int] = {}
+        for candidate in candidate_list:
+            count = cited.get(candidate.chunk_id, 0)
+            title = reliable_chapter_by_chunk_id.get(candidate.chunk_id)
+            if not count or not is_displayable_source_chapter(title):
+                continue
+            boundary_votes[title] += count
+            boundary_scores[title] = max(boundary_scores[title], float(candidate.score))
+            boundary_pages[title] = min(boundary_pages.get(title, int(candidate.page_start)), int(candidate.page_start))
+        if boundary_votes:
+            return max(
+                boundary_votes,
+                key=lambda title: (boundary_votes[title], boundary_scores[title], -boundary_pages[title]),
+            )
+
     grouped: dict[str, list[Any]] = {}
-    for candidate in candidates:
+    for candidate in candidate_list:
         chapter = getattr(candidate, "chapter", None)
         if candidate.chunk_id not in cited or not is_displayable_source_chapter(chapter):
             continue
@@ -157,7 +236,7 @@ def _chunk_confirms_heading(title: str, candidate: Any) -> bool:
     expected = normalize_content_title(title)
     lines = [
         _WHITESPACE.sub(" ", line).strip()
-        for line in getattr(candidate, "text", "").splitlines()
+        for line in _candidate_text(candidate).splitlines()
         if line.strip()
     ]
     heading_indexes = [index for index, line in enumerate(lines[:3]) if normalize_content_title(line) == expected]
@@ -165,6 +244,92 @@ def _chunk_confirms_heading(title: str, candidate: Any) -> bool:
         return False
     body = " ".join(line for index, line in enumerate(lines) if index not in heading_indexes)
     return len(re.findall(r"[A-Za-z0-9\u4e00-\u9fff]", body)) >= 20
+
+
+def _candidate_text(candidate: Any) -> str:
+    return str(getattr(candidate, "text", None) or getattr(candidate, "content", None) or "")
+
+
+def _chunk_looks_like_toc(candidate: Any) -> bool:
+    lines = [_WHITESPACE.sub(" ", line).strip() for line in _candidate_text(candidate).splitlines() if line.strip()]
+    chapter_lines = {
+        normalize_content_title(line)
+        for line in lines
+        if _CHAPTER_LINE.match(line)
+    }
+    return len(chapter_lines) >= 2
+
+
+def _heading_body_characters(title: str, candidate: Any) -> int:
+    expected = normalize_content_title(title)
+    lines = [_WHITESPACE.sub(" ", line).strip() for line in _candidate_text(candidate).splitlines() if line.strip()]
+    body = " ".join(line for line in lines if normalize_content_title(line) != expected)
+    return len(re.findall(r"[A-Za-z0-9\u4e00-\u9fff]", body))
+
+
+def _chapter_number(title: str) -> int | None:
+    match = _NUMBERED_CHAPTER.match(title)
+    if not match:
+        return None
+    value = match.group(1)
+    if value.isdigit():
+        return int(value)
+    digits = {"零": 0, "〇": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+    if value == "十":
+        return 10
+    if "百" in value:
+        hundreds, remainder = value.split("百", 1)
+        base = digits.get(hundreds, 1) * 100
+        return base + (_chinese_below_hundred(remainder, digits) if remainder else 0)
+    return _chinese_below_hundred(value, digits)
+
+
+def _chinese_below_hundred(value: str, digits: dict[str, int]) -> int | None:
+    if not value:
+        return 0
+    if "十" in value:
+        tens, ones = value.split("十", 1)
+        return digits.get(tens, 1) * 10 + digits.get(ones, 0)
+    if all(character in digits for character in value):
+        number = 0
+        for character in value:
+            number = number * 10 + digits[character]
+        return number
+    return None
+
+
+def _best_boundary_run(candidates: list[SourceChapterBoundary]) -> list[SourceChapterBoundary]:
+    if not candidates:
+        return []
+    runs: list[list[SourceChapterBoundary]] = []
+    current: list[SourceChapterBoundary] = []
+    seen_titles: set[str] = set()
+    previous_number: int | None = None
+    for candidate in sorted(candidates, key=lambda item: item.start_position):
+        normalized = normalize_content_title(candidate.title)
+        resets_numbering = (
+            previous_number is not None
+            and candidate.chapter_number is not None
+            and candidate.chapter_number <= previous_number
+        )
+        if current and (normalized in seen_titles or resets_numbering):
+            runs.append(current)
+            current = []
+            seen_titles = set()
+            previous_number = None
+        current.append(candidate)
+        seen_titles.add(normalized)
+        if candidate.chapter_number is not None:
+            previous_number = candidate.chapter_number
+    if current:
+        runs.append(current)
+
+    def score(run: list[SourceChapterBoundary]) -> tuple[int, int, int, int]:
+        unique = len({normalize_content_title(item.title) for item in run})
+        span = max(item.start_page for item in run) - min(item.start_page for item in run)
+        return unique, span, sum(item.body_characters for item in run), max(item.start_page for item in run)
+
+    return max(runs, key=score)
 
 
 def canonical_learning_material(project_id: uuid.UUID, chapters: Iterable[Chapter]) -> LearningMaterialRead:
