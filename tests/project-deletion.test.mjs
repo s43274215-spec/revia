@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { projectDeletionConfirmation, removeDeletedProject } from "../src/lib/project-deletion.ts";
+import {
+  clampProjectContextMenuPosition,
+  projectDeletionConfirmation,
+  removeDeletedProject,
+} from "../src/lib/project-deletion.ts";
 
 const projects = [
   { id: "keep", name: "保留项目" },
@@ -23,4 +27,18 @@ test("successful deletion removes the project and its active task from dashboard
   );
   assert.deepEqual(result.projects.map((project) => project.id), ["keep"]);
   assert.equal(result.activeDocument, null);
+});
+
+test("project context menu stays inside the viewport near the lower-right edge", () => {
+  assert.deepEqual(
+    clampProjectContextMenuPosition(995, 795, 1000, 800),
+    { x: 816, y: 744 },
+  );
+});
+
+test("project context menu keeps ordinary pointer coordinates", () => {
+  assert.deepEqual(
+    clampProjectContextMenuPosition(320, 240, 1000, 800),
+    { x: 320, y: 240 },
+  );
 });
