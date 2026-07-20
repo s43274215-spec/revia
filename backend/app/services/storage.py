@@ -18,6 +18,14 @@ class StorageError(RuntimeError):
     pass
 
 
+class StorageNotFoundError(StorageError):
+    pass
+
+
+class StorageUnavailableError(StorageError):
+    pass
+
+
 class UploadLimitError(ValueError):
     pass
 
@@ -187,7 +195,7 @@ class LocalStorageProvider:
     def download_to_temp(self, object_key: str) -> Path:
         path = self.resolve(object_key)
         if not path.is_file():
-            raise StorageError("原始 PDF 已不存在，无法继续解析")
+            raise StorageNotFoundError("原始 PDF 已不存在，无法继续解析")
         return path
 
     def delete_object(self, object_key: str) -> None:
@@ -200,7 +208,7 @@ class LocalStorageProvider:
         try:
             return self.resolve(object_key).stat().st_size
         except FileNotFoundError as exc:
-            raise StorageError("原始 PDF 已不存在") from exc
+            raise StorageNotFoundError("原始 PDF 已不存在") from exc
 
     def release_temp(self, path: Path) -> None:
         return None
@@ -268,15 +276,39 @@ class S3StorageProvider:
         descriptor, name = tempfile.mkstemp(prefix="revia-", suffix=".pdf", dir=self._temp_root)
         os.close(descriptor)
         path = Path(name)
+        body = None
         try:
+            response = self._client.get_object(Bucket=self._bucket, Key=object_key)
+            body = response["Body"]
+            expected_size = int(response.get("ContentLength") or 0)
+            downloaded_size = 0
             with path.open("wb") as target:
-                self._client.download_fileobj(self._bucket, object_key, target)
+                while True:
+                    chunk = body.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    downloaded_size += len(chunk)
+                    target.write(chunk)
+            if expected_size and downloaded_size != expected_size:
+                raise StorageUnavailableError(
+                    f"对象存储下载不完整（expected={expected_size}, received={downloaded_size}）"
+                )
             return path
+        except StorageUnavailableError:
+            path.unlink(missing_ok=True)
+            raise
         except Exception as exc:
             path.unlink(missing_ok=True)
             if self._is_not_found(exc):
-                raise StorageError("原始 PDF 已不存在，无法继续解析") from exc
-            raise StorageError("无法从对象存储下载 PDF") from exc
+                raise StorageNotFoundError("原始 PDF 已不存在，无法继续解析") from exc
+            code = self._safe_error_code(exc)
+            raise StorageUnavailableError(
+                f"对象存储下载暂时失败（{code}），请稍后继续识别"
+            ) from exc
+        finally:
+            close = getattr(body, "close", None)
+            if callable(close):
+                close()
 
     def delete_object(self, object_key: str) -> None:
         self._client.delete_object(Bucket=self._bucket, Key=object_key)
@@ -288,7 +320,7 @@ class S3StorageProvider:
         except Exception as exc:
             if self._is_not_found(exc):
                 return False
-            raise StorageError("无法检查对象存储文件") from exc
+            raise StorageUnavailableError(f"无法检查对象存储文件（{self._safe_error_code(exc)}）") from exc
 
     def object_size(self, object_key: str) -> int:
         try:
@@ -296,8 +328,8 @@ class S3StorageProvider:
             return int(response["ContentLength"])
         except Exception as exc:
             if self._is_not_found(exc):
-                raise StorageError("原始 PDF 已不存在") from exc
-            raise StorageError("无法读取对象存储文件信息") from exc
+                raise StorageNotFoundError("原始 PDF 已不存在") from exc
+            raise StorageUnavailableError(f"无法读取对象存储文件信息（{self._safe_error_code(exc)}）") from exc
 
     def release_temp(self, path: Path) -> None:
         path.unlink(missing_ok=True)
@@ -307,6 +339,14 @@ class S3StorageProvider:
         response = getattr(exc, "response", {})
         code = str(response.get("Error", {}).get("Code", ""))
         return code in {"404", "NoSuchKey", "NotFound"}
+
+    @staticmethod
+    def _safe_error_code(exc: Exception) -> str:
+        response = getattr(exc, "response", {})
+        code = str(response.get("Error", {}).get("Code", "")).strip()
+        if code:
+            return code[:80]
+        return exc.__class__.__name__[:80]
 
 
 def build_storage_provider(settings: object) -> StorageProvider:

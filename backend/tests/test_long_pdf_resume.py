@@ -20,6 +20,7 @@ from app.models.enums import (
     DocumentPageStatus,
     DocumentProcessingStatus,
     ExtractionMethod,
+    ProjectStatus,
 )
 from app.models.project import Document, Project
 from app.models.workspace import Workspace
@@ -27,22 +28,46 @@ from app.services.document_processing import DocumentProcessingError, DocumentPr
 from app.services.storage import (
     LocalStorageProvider,
     S3StorageProvider,
+    StorageUnavailableError,
     UploadAuthorizationError,
     UploadURLSigner,
     build_object_key,
 )
 
 
+class FakeStreamingBody:
+    def __init__(self, content: bytes) -> None:
+        self._content = content
+        self._position = 0
+        self.read_sizes: list[int] = []
+        self.closed = False
+
+    def read(self, size: int) -> bytes:
+        self.read_sizes.append(size)
+        chunk = self._content[self._position:self._position + size]
+        self._position += len(chunk)
+        return chunk
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class FakeS3Client:
     def __init__(self, objects: dict[str, bytes]) -> None:
         self.objects = objects
         self.deleted: list[str] = []
+        self.bodies: list[FakeStreamingBody] = []
+        self.get_error: Exception | None = None
 
     def generate_presigned_url(self, operation: str, *, Params: dict, ExpiresIn: int) -> str:
         return f"https://private-s3.example/{Params['Key']}?expires={ExpiresIn}"
 
-    def download_fileobj(self, bucket: str, key: str, target) -> None:
-        target.write(self.objects[key])
+    def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
+        if self.get_error is not None:
+            raise self.get_error
+        body = FakeStreamingBody(self.objects[Key])
+        self.bodies.append(body)
+        return {"ContentLength": len(self.objects[Key]), "Body": body}
 
     def head_object(self, *, Bucket: str, Key: str) -> dict[str, int]:
         return {"ContentLength": len(self.objects[Key])}
@@ -50,6 +75,10 @@ class FakeS3Client:
     def delete_object(self, *, Bucket: str, Key: str) -> None:
         self.deleted.append(Key)
         self.objects.pop(Key, None)
+
+
+class FakeS3RequestError(RuntimeError):
+    response = {"Error": {"Code": "RequestTimeout"}}
 
 
 def build_text_pdf(page_count: int) -> bytes:
@@ -294,6 +323,67 @@ class LongPDFResumeTests(unittest.TestCase):
             self.assertEqual(parsed.processing_status, DocumentProcessingStatus.PARSED)
             self.assertNotIn(object_key, objects)
             self.assertEqual(client.deleted, [object_key])
+            self.assertEqual(len(client.bodies), 1)
+            self.assertTrue(client.bodies[0].closed)
+            self.assertTrue(all(size == 1024 * 1024 for size in client.bodies[0].read_sizes))
+
+    def test_s3_download_exposes_safe_error_code_without_object_path(self) -> None:
+        object_key = build_object_key(self.workspace_id, uuid.uuid4())
+        client = FakeS3Client({object_key: b"pdf"})
+        client.get_error = FakeS3RequestError("secret endpoint detail")
+        s3 = S3StorageProvider.__new__(S3StorageProvider)
+        s3._client = client
+        s3._bucket = "private-revia"
+        s3._temp_root = Path(self.storage_directory.name)
+
+        with self.assertRaisesRegex(StorageUnavailableError, "RequestTimeout") as captured:
+            s3.download_to_temp(object_key)
+        self.assertNotIn(object_key, str(captured.exception))
+
+    def test_failed_document_can_requeue_and_resume_from_saved_pages(self) -> None:
+        document_id = self._document(3)
+        with self.Session() as db:
+            document = db.get(Document, document_id)
+            assert document is not None
+            document.processing_status = DocumentProcessingStatus.FAILED
+            document.processing_phase = "failed"
+            document.total_pages = 3
+            document.processed_pages = 2
+            document.current_page = 3
+            document.retry_count = 50
+            document.error_message = "无法从对象存储下载 PDF"
+            for page_number in (1, 2):
+                db.add(DocumentPage(
+                    document_id=document_id,
+                    page_number=page_number,
+                    status=DocumentPageStatus.COMPLETED,
+                    extraction_method=ExtractionMethod.TEXT,
+                    extracted_text=f"saved page {page_number}",
+                    character_count=12,
+                ))
+            db.commit()
+
+            service = self._service(db)
+            queued = service.resume_failed_document(self.workspace_id, self.project_id, document_id)
+            self.assertEqual(queued.processing_status, DocumentProcessingStatus.QUEUED)
+            self.assertEqual(queued.processing_phase, "queued")
+            self.assertEqual(queued.current_page, 3)
+            self.assertEqual(queued.retry_count, 0)
+            self.assertIsNone(queued.error_message)
+            project = db.get(Project, self.project_id)
+            assert project is not None
+            self.assertEqual(project.status, ProjectStatus.PROCESSING)
+
+            completed = service.process_document(document_id)
+            self.assertEqual(completed.processing_status, DocumentProcessingStatus.PARSED)
+            pages = list(db.scalars(
+                select(DocumentPage)
+                .where(DocumentPage.document_id == document_id)
+                .order_by(DocumentPage.page_number)
+            ).all())
+            self.assertEqual([page.page_number for page in pages], [1, 2, 3])
+            self.assertEqual(pages[0].extracted_text, "saved page 1")
+            self.assertEqual(pages[1].extracted_text, "saved page 2")
 
     def test_missing_resume_object_marks_document_failed_instead_of_stuck_processing(self) -> None:
         document_id = uuid.uuid4()

@@ -29,6 +29,7 @@ from app.models.enums import (
     DocumentPageStatus,
     DocumentProcessingStatus,
     ExtractionMethod,
+    ProjectStatus,
     WorkspaceRole,
 )
 from app.models.project import Document, Project
@@ -36,6 +37,7 @@ from app.models.workspace import QuotaGuard, Workspace
 from app.services.storage import (
     LocalStorageProvider,
     StorageError,
+    StorageNotFoundError,
     StorageProvider,
     UploadLimitError,
     UploadTarget,
@@ -61,6 +63,10 @@ class DocumentNotFoundError(LookupError):
 
 
 class DocumentCancellationError(DocumentProcessingError):
+    pass
+
+
+class DocumentResumeError(DocumentProcessingError):
     pass
 
 
@@ -269,6 +275,9 @@ class DocumentProcessingService:
             document.processing_status = DocumentProcessingStatus.QUEUED
             document.processing_phase = "queued"
             document.error_message = None
+            project = self._project(workspace_id, project_id)
+            if not project.chapters:
+                project.status = ProjectStatus.PROCESSING
             self._db.commit()
         self._db.refresh(document)
         return document
@@ -341,13 +350,92 @@ class DocumentProcessingService:
     def latest_document(
         self, workspace_id: uuid.UUID, project_id: uuid.UUID, kind: DocumentKind
     ) -> Document | None:
-        self._project(workspace_id, project_id)
-        return self._db.scalar(
+        project = self._project(workspace_id, project_id)
+        document = self._db.scalar(
             select(Document)
             .where(Document.project_id == project_id, Document.kind == kind)
             .order_by(Document.created_at.desc())
             .limit(1)
         )
+        if document is not None and kind == DocumentKind.COURSE_MATERIAL and not project.chapters:
+            desired_status: ProjectStatus | None = None
+            if document.processing_status == DocumentProcessingStatus.FAILED:
+                desired_status = ProjectStatus.FAILED
+            elif project.status == ProjectStatus.NOT_UPLOADED and document.processing_status in {
+                DocumentProcessingStatus.UPLOADED,
+                DocumentProcessingStatus.QUEUED,
+                DocumentProcessingStatus.PROCESSING,
+                DocumentProcessingStatus.PARSING,
+                DocumentProcessingStatus.INTERRUPTED,
+                DocumentProcessingStatus.PARSED,
+            }:
+                desired_status = ProjectStatus.PROCESSING
+            if desired_status is not None and project.status != desired_status:
+                project.status = desired_status
+                self._db.commit()
+        return document
+
+    def resume_failed_document(
+        self,
+        workspace_id: uuid.UUID,
+        project_id: uuid.UUID,
+        document_id: uuid.UUID,
+    ) -> Document:
+        document = self.get_document(workspace_id, project_id, document_id)
+        if document.processing_status != DocumentProcessingStatus.FAILED:
+            raise DocumentResumeError("只有处理失败的 PDF 才能继续识别")
+        if not document.storage_key:
+            raise DocumentResumeError("原始 PDF 已不存在，请重新上传")
+        if document.storage_backend != self._storage.backend_name:
+            raise DocumentResumeError("当前存储配置与原 PDF 不一致，无法继续识别")
+        validate_object_scope(document.storage_key, workspace_id, document.id)
+        if not self._storage.object_exists(document.storage_key):
+            raise DocumentResumeError("原始 PDF 已不存在，请重新上传")
+        actual_size = self._storage.object_size(document.storage_key)
+        if actual_size != document.size_bytes:
+            raise DocumentResumeError("对象存储中的 PDF 与原上传记录不一致，请重新上传原文件")
+
+        now = datetime.now(UTC)
+        cutoff = now - timedelta(hours=24)
+        with _quota_lock:
+            self._lock_quota_guard()
+            workspace = self._db.scalar(select(Workspace).where(Workspace.id == workspace_id).with_for_update())
+            if workspace is None:
+                self._db.rollback()
+                raise DocumentProjectNotFoundError("工作区不存在")
+            if self._active_document_count(workspace_id, exclude_document_id=document.id) >= self._workspace_max_active_documents:
+                self._db.rollback()
+                raise DocumentQuotaError("当前已有一份资料正在排队或处理中，请完成后再继续识别。")
+            pages = document.total_pages or document.quota_pages
+            if workspace.role != WorkspaceRole.OWNER and document.quota_released_at is not None:
+                workspace_pages = self._rolling_page_total(cutoff, workspace_id=workspace_id)
+                if workspace_pages + pages > self._workspace_rolling_24h_page_limit:
+                    self._db.rollback()
+                    raise DocumentQuotaError("继续识别后将超过最近24小时页数额度，请稍后再试。")
+                global_pages = self._rolling_page_total(cutoff)
+                if global_pages + pages > self._global_rolling_24h_page_limit:
+                    self._db.rollback()
+                    raise DocumentQuotaError("当前全站任务较多，请稍后再继续识别。")
+
+            project = self._project(workspace_id, project_id)
+            document.processing_status = DocumentProcessingStatus.QUEUED
+            document.processing_phase = "queued"
+            document.current_page = min(document.total_pages, document.processed_pages + 1) if document.total_pages else document.processed_pages + 1
+            document.retry_count = 0
+            document.retry_not_before = None
+            document.cancelled_at = None
+            document.lease_owner = None
+            document.lease_expires_at = None
+            document.error_message = None
+            document.queued_at = now
+            document.accepted_at = now
+            document.quota_pages = document.total_pages or document.quota_pages
+            document.quota_released_at = None
+            if not project.chapters:
+                project.status = ProjectStatus.PROCESSING
+            self._db.commit()
+        self._db.refresh(document)
+        return document
 
     def process_document(
         self,
@@ -375,7 +463,7 @@ class DocumentProcessingService:
             if document is None:
                 raise DocumentNotFoundError("文档不存在")
             if not document.storage_key:
-                raise StorageError("原始 PDF 已不存在，无法继续解析")
+                raise StorageNotFoundError("原始 PDF 已不存在，无法继续解析")
             if document.storage_backend != self._storage.backend_name:
                 raise StorageError("当前存储配置与文档对象不一致，无法恢复解析")
             local_path = self._storage.download_to_temp(document.storage_key)
@@ -811,7 +899,9 @@ class DocumentProcessingService:
         document.retry_count = int(document.retry_count or 0) + 1
         resource_limited = isinstance(exc, OCRResourceLimitedError)
         ocr_disabled = isinstance(exc, OCRDisabledError)
-        missing_source = isinstance(exc, StorageError) and "不存在" in str(exc)
+        missing_source = isinstance(exc, StorageNotFoundError) or (
+            isinstance(exc, StorageError) and "不存在" in str(exc)
+        )
         invalid_pdf = isinstance(exc, PDFParsingError) and (
             "页数不能超过" in str(exc) or "不是有效 PDF" in str(exc) or "无法打开 PDF" in str(exc)
         )
@@ -868,6 +958,13 @@ class DocumentProcessingService:
             document.error_message = self._safe_error(exc)
         document.lease_owner = None
         document.lease_expires_at = None
+        project = self._db.get(Project, document.project_id)
+        if project is not None and not project.chapters:
+            project.status = (
+                ProjectStatus.FAILED
+                if document.processing_status == DocumentProcessingStatus.FAILED
+                else ProjectStatus.PROCESSING
+            )
         if document.processing_status == DocumentProcessingStatus.FAILED:
             self._release_quota_once(document)
         self._db.commit()
