@@ -205,15 +205,6 @@ class DocumentProcessingService:
         if document.storage_backend != self._storage.backend_name:
             raise DocumentProcessingError("当前存储配置与文档对象不一致，无法确认上传")
         validate_object_scope(document.storage_key, workspace_id, document.id)
-        if not self._storage.object_exists(document.storage_key):
-            raise DocumentProcessingError("上传文件不存在或上传尚未完成")
-        actual_size = self._storage.object_size(document.storage_key)
-        if actual_size > self._max_upload_bytes:
-            self._reject_uploaded_object(
-                document, f"PDF 文件不能超过 {self._max_upload_bytes // (1024 * 1024)}MB"
-            )
-        if actual_size != document.size_bytes:
-            self._reject_uploaded_object(document, "上传文件大小与创建上传任务时不一致")
         with _quota_lock:
             self._lock_quota_guard()
             workspace = self._db.scalar(select(Workspace).where(Workspace.id == workspace_id).with_for_update())
@@ -230,6 +221,13 @@ class DocumentProcessingService:
         local_path: Path | None = None
         try:
             local_path = self._storage.download_to_temp(document.storage_key)
+            actual_size = local_path.stat().st_size
+            if actual_size > self._max_upload_bytes:
+                self._reject_uploaded_object(
+                    document, f"PDF 文件不能超过 {self._max_upload_bytes // (1024 * 1024)}MB"
+                )
+            if actual_size != document.size_bytes:
+                self._reject_uploaded_object(document, "上传文件大小与创建上传任务时不一致")
             try:
                 with fitz.open(local_path) as pdf:
                     total_pages = self._parser.validate_document(pdf)
@@ -389,11 +387,15 @@ class DocumentProcessingService:
         if document.storage_backend != self._storage.backend_name:
             raise DocumentResumeError("当前存储配置与原 PDF 不一致，无法继续识别")
         validate_object_scope(document.storage_key, workspace_id, document.id)
-        if not self._storage.object_exists(document.storage_key):
-            raise DocumentResumeError("原始 PDF 已不存在，请重新上传")
-        actual_size = self._storage.object_size(document.storage_key)
-        if actual_size != document.size_bytes:
-            raise DocumentResumeError("对象存储中的 PDF 与原上传记录不一致，请重新上传原文件")
+        local_path: Path | None = None
+        try:
+            local_path = self._storage.download_to_temp(document.storage_key)
+            actual_size = local_path.stat().st_size
+            if actual_size != document.size_bytes:
+                raise DocumentResumeError("对象存储中的 PDF 与原上传记录不一致，请重新上传原文件")
+        finally:
+            if local_path is not None:
+                self._storage.release_temp(local_path)
 
         now = datetime.now(UTC)
         cutoff = now - timedelta(hours=24)

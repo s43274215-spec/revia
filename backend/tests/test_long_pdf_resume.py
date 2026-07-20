@@ -58,6 +58,8 @@ class FakeS3Client:
         self.deleted: list[str] = []
         self.bodies: list[FakeStreamingBody] = []
         self.get_error: Exception | None = None
+        self.head_error: Exception | None = None
+        self.head_calls = 0
 
     def generate_presigned_url(self, operation: str, *, Params: dict, ExpiresIn: int) -> str:
         return f"https://private-s3.example/{Params['Key']}?expires={ExpiresIn}"
@@ -70,6 +72,9 @@ class FakeS3Client:
         return {"ContentLength": len(self.objects[Key]), "Body": body}
 
     def head_object(self, *, Bucket: str, Key: str) -> dict[str, int]:
+        self.head_calls += 1
+        if self.head_error is not None:
+            raise self.head_error
         return {"ContentLength": len(self.objects[Key])}
 
     def delete_object(self, *, Bucket: str, Key: str) -> None:
@@ -79,6 +84,10 @@ class FakeS3Client:
 
 class FakeS3RequestError(RuntimeError):
     response = {"Error": {"Code": "RequestTimeout"}}
+
+
+class FakeS3ForbiddenError(RuntimeError):
+    response = {"Error": {"Code": "403"}}
 
 
 def build_text_pdf(page_count: int) -> bytes:
@@ -326,6 +335,88 @@ class LongPDFResumeTests(unittest.TestCase):
             self.assertEqual(len(client.bodies), 1)
             self.assertTrue(client.bodies[0].closed)
             self.assertTrue(all(size == 1024 * 1024 for size in client.bodies[0].read_sizes))
+
+    def test_s3_upload_confirmation_uses_get_when_head_is_forbidden(self) -> None:
+        document_id = uuid.uuid4()
+        object_key = build_object_key(self.workspace_id, document_id)
+        content = build_text_pdf(2)
+        client = FakeS3Client({object_key: content})
+        client.head_error = FakeS3ForbiddenError("head forbidden")
+        s3 = S3StorageProvider.__new__(S3StorageProvider)
+        s3._client = client
+        s3._bucket = "private-revia"
+        s3._temp_root = Path(self.storage_directory.name)
+        with self.Session() as db:
+            db.add(Document(
+                id=document_id,
+                project_id=self.project_id,
+                kind=DocumentKind.COURSE_MATERIAL,
+                original_name="head-forbidden.pdf",
+                mime_type="application/pdf",
+                size_bytes=len(content),
+                storage_key=object_key,
+                storage_backend="s3",
+                processing_status=DocumentProcessingStatus.UPLOADED,
+                processing_phase="uploaded",
+            ))
+            db.commit()
+            service = DocumentProcessingService(
+                db,
+                s3,
+                PDFParser(max_pages=600),
+                TextStructurer(),
+                StructuredTextSplitter(),
+                max_upload_bytes=150 * 1024 * 1024,
+            )
+            confirmed = service.confirm_upload(self.workspace_id, self.project_id, document_id)
+            self.assertEqual(confirmed.processing_status, DocumentProcessingStatus.QUEUED)
+            self.assertEqual(confirmed.total_pages, 2)
+        self.assertEqual(client.head_calls, 0)
+        self.assertEqual(len(client.bodies), 1)
+        self.assertTrue(client.bodies[0].closed)
+
+    def test_s3_failed_resume_uses_get_when_head_is_forbidden(self) -> None:
+        document_id = uuid.uuid4()
+        object_key = build_object_key(self.workspace_id, document_id)
+        content = build_text_pdf(3)
+        client = FakeS3Client({object_key: content})
+        client.head_error = FakeS3ForbiddenError("head forbidden")
+        s3 = S3StorageProvider.__new__(S3StorageProvider)
+        s3._client = client
+        s3._bucket = "private-revia"
+        s3._temp_root = Path(self.storage_directory.name)
+        with self.Session() as db:
+            db.add(Document(
+                id=document_id,
+                project_id=self.project_id,
+                kind=DocumentKind.COURSE_MATERIAL,
+                original_name="resume-head-forbidden.pdf",
+                mime_type="application/pdf",
+                size_bytes=len(content),
+                storage_key=object_key,
+                storage_backend="s3",
+                processing_status=DocumentProcessingStatus.FAILED,
+                processing_phase="failed",
+                total_pages=3,
+                processed_pages=2,
+                current_page=3,
+                error_message="无法检查对象存储文件（403）",
+            ))
+            db.commit()
+            service = DocumentProcessingService(
+                db,
+                s3,
+                PDFParser(max_pages=600),
+                TextStructurer(),
+                StructuredTextSplitter(),
+                max_upload_bytes=150 * 1024 * 1024,
+            )
+            queued = service.resume_failed_document(self.workspace_id, self.project_id, document_id)
+            self.assertEqual(queued.processing_status, DocumentProcessingStatus.QUEUED)
+            self.assertEqual(queued.current_page, 3)
+        self.assertEqual(client.head_calls, 0)
+        self.assertEqual(len(client.bodies), 1)
+        self.assertTrue(client.bodies[0].closed)
 
     def test_s3_download_exposes_safe_error_code_without_object_path(self) -> None:
         object_key = build_object_key(self.workspace_id, uuid.uuid4())
