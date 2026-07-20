@@ -32,7 +32,7 @@ test("successful deletion removes the project and its active task from dashboard
 test("project context menu stays inside the viewport near the lower-right edge", () => {
   assert.deepEqual(
     clampProjectContextMenuPosition(995, 795, 1000, 800),
-    { x: 816, y: 744 },
+    { x: 816, y: 704 },
   );
 });
 

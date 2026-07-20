@@ -224,6 +224,7 @@ mark { padding:1px 2px; background:#dfe9e3; color:inherit; }
 .project-context-menu { position:fixed; z-index:70; width:176px; padding:6px; border:1px solid var(--line); border-radius:8px; background:#fff; box-shadow:0 12px 30px rgba(42,45,41,.15); font-size:12px; }
 .project-context-menu button { display:flex; width:100%; padding:9px 10px; border:0; border-radius:5px; background:transparent; color:var(--ink); text-align:left; cursor:pointer; }
 .project-context-menu button:hover { background:var(--warm); }
+.project-context-menu-separator { height:1px; margin:4px 5px; background:var(--line); }
 .project-context-menu button.danger { color:#9b554e; }
 .project-context-menu button:disabled { color:#aaa; cursor:wait; }
 .project-context-menu button:disabled:hover { background:transparent; }
@@ -246,9 +247,12 @@ mark { padding:1px 2px; background:#dfe9e3; color:inherit; }
 .entry-dialog input,.entry-dialog textarea,.syllabus-text textarea { width:100%; padding:11px 12px; border:1px solid var(--line); border-radius:7px; outline:0; background:#fff; color:var(--ink); font-size:12px; }
 .entry-dialog textarea { min-height:92px; resize:vertical; }
 .entry-dialog input:focus,.entry-dialog textarea:focus,.syllabus-text textarea:focus { border-color:#9dada3; box-shadow:0 0 0 2px rgba(96,122,109,.09); }
+.entry-dialog input:disabled,.entry-dialog textarea:disabled { background:#f6f5f2; color:#8d908a; cursor:wait; }
+.entry-dialog-error { margin:12px 0 -10px; color:#9b554e; font-size:11px; line-height:1.5; }
 .entry-dialog-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:27px; }
 .entry-dialog-actions button { height:35px; padding:0 14px; border:1px solid var(--line); border-radius:7px; background:#fff; font-size:11px; cursor:pointer; }
 .entry-dialog-actions button.entry-primary { border-color:var(--accent); background:var(--accent); }
+.entry-dialog-actions button:disabled { opacity:.5; cursor:not-allowed; }
 .upload-content { width:min(860px,calc(100% - 64px)); margin:0 auto; padding:32px 0 100px; }
 .back-link { padding:5px 0; border:0; background:transparent; color:var(--muted); font-size:11px; cursor:pointer; }
 .back-link:hover { color:var(--accent); }
