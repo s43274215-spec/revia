@@ -28,6 +28,7 @@ from app.services.document_processing import DocumentProcessingError, DocumentPr
 from app.services.storage import (
     LocalStorageProvider,
     S3StorageProvider,
+    StorageDownloadLimitError,
     StorageUnavailableError,
     UploadAuthorizationError,
     UploadURLSigner,
@@ -97,6 +98,20 @@ class FakeDetailedS3AccessDeniedError(RuntimeError):
             "HTTPStatusCode": 403,
             "RequestId": "request-123",
             "HostId": "host-456",
+        },
+    }
+
+
+class FakeS3DownloadCapError(RuntimeError):
+    response = {
+        "Error": {
+            "Code": "AccessDenied",
+            "Message": "Cannot download file, download bandwidth or transaction (Class B) cap exceeded.",
+        },
+        "ResponseMetadata": {
+            "HTTPStatusCode": 403,
+            "RequestId": "cap-request-123",
+            "HostId": "cap-host-456",
         },
     }
 
@@ -386,7 +401,7 @@ class LongPDFResumeTests(unittest.TestCase):
         self.assertEqual(len(client.bodies), 1)
         self.assertTrue(client.bodies[0].closed)
 
-    def test_s3_failed_resume_uses_get_when_head_is_forbidden(self) -> None:
+    def test_s3_failed_resume_falls_back_to_get_when_head_is_forbidden(self) -> None:
         document_id = uuid.uuid4()
         object_key = build_object_key(self.workspace_id, document_id)
         content = build_text_pdf(3)
@@ -425,9 +440,49 @@ class LongPDFResumeTests(unittest.TestCase):
             queued = service.resume_failed_document(self.workspace_id, self.project_id, document_id)
             self.assertEqual(queued.processing_status, DocumentProcessingStatus.QUEUED)
             self.assertEqual(queued.current_page, 3)
-        self.assertEqual(client.head_calls, 0)
+        self.assertEqual(client.head_calls, 1)
         self.assertEqual(len(client.bodies), 1)
         self.assertTrue(client.bodies[0].closed)
+
+    def test_s3_resume_uses_head_without_downloading_the_pdf(self) -> None:
+        document_id = uuid.uuid4()
+        object_key = build_object_key(self.workspace_id, document_id)
+        content = build_text_pdf(3)
+        client = FakeS3Client({object_key: content})
+        s3 = S3StorageProvider.__new__(S3StorageProvider)
+        s3._client = client
+        s3._bucket = "private-revia"
+        s3._temp_root = Path(self.storage_directory.name)
+        with self.Session() as db:
+            db.add(Document(
+                id=document_id,
+                project_id=self.project_id,
+                kind=DocumentKind.COURSE_MATERIAL,
+                original_name="resume-head.pdf",
+                mime_type="application/pdf",
+                size_bytes=len(content),
+                storage_key=object_key,
+                storage_backend="s3",
+                processing_status=DocumentProcessingStatus.FAILED,
+                processing_phase="failed",
+                total_pages=3,
+                processed_pages=2,
+                current_page=3,
+                error_message="temporary storage failure",
+            ))
+            db.commit()
+            service = DocumentProcessingService(
+                db,
+                s3,
+                PDFParser(max_pages=600),
+                TextStructurer(),
+                StructuredTextSplitter(),
+                max_upload_bytes=150 * 1024 * 1024,
+            )
+            queued = service.resume_failed_document(self.workspace_id, self.project_id, document_id)
+            self.assertEqual(queued.processing_status, DocumentProcessingStatus.QUEUED)
+        self.assertEqual(client.head_calls, 1)
+        self.assertEqual(client.bodies, [])
 
     def test_s3_download_exposes_safe_error_code_without_object_path(self) -> None:
         object_key = build_object_key(self.workspace_id, uuid.uuid4())
@@ -463,6 +518,115 @@ class LongPDFResumeTests(unittest.TestCase):
         self.assertIn("request_id=request-123", logs)
         self.assertIn("host_id=host-456", logs)
         self.assertNotIn("workspaces/", logs)
+
+    def test_s3_download_cap_has_clear_retryable_error(self) -> None:
+        object_key = build_object_key(self.workspace_id, uuid.uuid4())
+        client = FakeS3Client({object_key: b"pdf"})
+        client.get_error = FakeS3DownloadCapError("cap exceeded")
+        s3 = S3StorageProvider.__new__(S3StorageProvider)
+        s3._client = client
+        s3._bucket = "private-revia"
+        s3._temp_root = Path(self.storage_directory.name)
+
+        with self.assertLogs("revia.storage", level="ERROR"):
+            with self.assertRaisesRegex(StorageDownloadLimitError, "今日下载额度已用完"):
+                s3.download_to_temp(object_key)
+
+    def test_upload_confirmation_storage_cap_marks_failed_and_preserves_pdf(self) -> None:
+        document_id = uuid.uuid4()
+        object_key = build_object_key(self.workspace_id, document_id)
+        content = build_text_pdf(2)
+        client = FakeS3Client({object_key: content})
+        client.get_error = FakeS3DownloadCapError("cap exceeded")
+        s3 = S3StorageProvider.__new__(S3StorageProvider)
+        s3._client = client
+        s3._bucket = "private-revia"
+        s3._temp_root = Path(self.storage_directory.name)
+
+        with self.Session() as db:
+            db.add(Document(
+                id=document_id,
+                project_id=self.project_id,
+                kind=DocumentKind.COURSE_MATERIAL,
+                original_name="cap-confirm.pdf",
+                mime_type="application/pdf",
+                size_bytes=len(content),
+                storage_key=object_key,
+                storage_backend="s3",
+                processing_status=DocumentProcessingStatus.UPLOADED,
+                processing_phase="uploading",
+            ))
+            db.commit()
+            service = DocumentProcessingService(
+                db,
+                s3,
+                PDFParser(max_pages=600),
+                TextStructurer(),
+                StructuredTextSplitter(),
+                max_upload_bytes=150 * 1024 * 1024,
+            )
+            with self.assertLogs("revia.storage", level="ERROR"):
+                with self.assertRaises(StorageDownloadLimitError):
+                    service.confirm_upload(self.workspace_id, self.project_id, document_id)
+
+            failed = db.get(Document, document_id)
+            assert failed is not None
+            self.assertEqual(failed.processing_status, DocumentProcessingStatus.FAILED)
+            self.assertEqual(failed.processing_phase, "failed")
+            self.assertIn("今日下载额度已用完", failed.error_message or "")
+            self.assertEqual(failed.storage_key, object_key)
+            self.assertIn(object_key, client.objects)
+            self.assertEqual(client.deleted, [])
+            project = db.get(Project, self.project_id)
+            assert project is not None
+            self.assertEqual(project.status, ProjectStatus.FAILED)
+
+    def test_processing_storage_cap_fails_once_without_auto_retry_window(self) -> None:
+        document_id = uuid.uuid4()
+        object_key = build_object_key(self.workspace_id, document_id)
+        content = build_text_pdf(2)
+        client = FakeS3Client({object_key: content})
+        client.get_error = FakeS3DownloadCapError("cap exceeded")
+        s3 = S3StorageProvider.__new__(S3StorageProvider)
+        s3._client = client
+        s3._bucket = "private-revia"
+        s3._temp_root = Path(self.storage_directory.name)
+
+        with self.Session() as db:
+            db.add(Document(
+                id=document_id,
+                project_id=self.project_id,
+                kind=DocumentKind.COURSE_MATERIAL,
+                original_name="cap-processing.pdf",
+                mime_type="application/pdf",
+                size_bytes=len(content),
+                storage_key=object_key,
+                storage_backend="s3",
+                processing_status=DocumentProcessingStatus.QUEUED,
+                processing_phase="queued",
+                total_pages=2,
+                quota_pages=2,
+            ))
+            db.commit()
+            service = DocumentProcessingService(
+                db,
+                s3,
+                PDFParser(max_pages=600),
+                TextStructurer(),
+                StructuredTextSplitter(),
+                max_upload_bytes=150 * 1024 * 1024,
+            )
+            with self.assertLogs("revia.storage", level="ERROR"):
+                with self.assertRaisesRegex(DocumentProcessingError, "今日下载额度已用完"):
+                    service.process_document(document_id)
+
+            failed = db.get(Document, document_id)
+            assert failed is not None
+            self.assertEqual(failed.processing_status, DocumentProcessingStatus.FAILED)
+            self.assertEqual(failed.processing_phase, "failed")
+            self.assertIsNone(failed.retry_not_before)
+            self.assertIn("今日下载额度已用完", failed.error_message or "")
+            self.assertEqual(failed.storage_key, object_key)
 
     def test_failed_document_can_requeue_and_resume_from_saved_pages(self) -> None:
         document_id = self._document(3)

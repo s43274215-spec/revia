@@ -30,6 +30,10 @@ class StorageUnavailableError(StorageError):
     pass
 
 
+class StorageDownloadLimitError(StorageUnavailableError):
+    pass
+
+
 class UploadLimitError(ValueError):
     pass
 
@@ -323,6 +327,10 @@ class S3StorageProvider:
                 details["request_id"],
                 details["host_id"],
             )
+            if self._is_download_limit_exceeded(details):
+                raise StorageDownloadLimitError(
+                    "对象存储今日下载额度已用完，请在额度重置或提高后继续识别"
+                ) from exc
             raise StorageUnavailableError(
                 f"对象存储下载暂时失败（{details['code']}），请稍后继续识别"
             ) from exc
@@ -380,6 +388,13 @@ class S3StorageProvider:
             "request_id": request_id[:160],
             "host_id": host_id[:300],
         }
+
+    @staticmethod
+    def _is_download_limit_exceeded(details: dict[str, str]) -> bool:
+        summary = f"{details.get('code', '')} {details.get('message', '')}".casefold()
+        return "cap exceeded" in summary and any(
+            marker in summary for marker in ("download", "bandwidth", "transaction", "class b")
+        )
 
     @classmethod
     def _safe_error_code(cls, exc: Exception) -> str:

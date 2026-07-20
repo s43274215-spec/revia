@@ -238,7 +238,7 @@ def get_latest_document(
         try:
             document = service.confirm_upload(workspace.id, project_id, document.id)
         except (DocumentProcessingError, StorageError):
-            pass
+            document = service.get_document(workspace.id, project_id, document.id)
     if workspace.access_mode != "demo":
         _schedule_resume(document, runner, background_tasks)
     return _progress(document, service.queue_position(document))

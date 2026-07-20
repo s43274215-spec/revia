@@ -36,9 +36,11 @@ from app.models.project import Document, Project
 from app.models.workspace import QuotaGuard, Workspace
 from app.services.storage import (
     LocalStorageProvider,
+    StorageDownloadLimitError,
     StorageError,
     StorageNotFoundError,
     StorageProvider,
+    StorageUnavailableError,
     UploadLimitError,
     UploadTarget,
     build_object_key,
@@ -236,6 +238,9 @@ class DocumentProcessingService:
             except Exception as exc:
                 self._reject_uploaded_object(document, "上传的文件不是有效 PDF")
                 raise DocumentProcessingError("上传的文件不是有效 PDF") from exc
+        except StorageError as exc:
+            self._mark_upload_confirmation_failed(document.id, exc)
+            raise
         finally:
             if local_path is not None:
                 self._storage.release_temp(local_path)
@@ -389,10 +394,15 @@ class DocumentProcessingService:
         validate_object_scope(document.storage_key, workspace_id, document.id)
         local_path: Path | None = None
         try:
-            local_path = self._storage.download_to_temp(document.storage_key)
-            actual_size = local_path.stat().st_size
+            try:
+                actual_size = self._storage.object_size(document.storage_key)
+            except StorageUnavailableError:
+                local_path = self._storage.download_to_temp(document.storage_key)
+                actual_size = local_path.stat().st_size
             if actual_size != document.size_bytes:
                 raise DocumentResumeError("对象存储中的 PDF 与原上传记录不一致，请重新上传原文件")
+        except StorageNotFoundError as exc:
+            raise DocumentResumeError("原始 PDF 已不存在，请重新上传") from exc
         finally:
             if local_path is not None:
                 self._storage.release_temp(local_path)
@@ -904,6 +914,7 @@ class DocumentProcessingService:
         missing_source = isinstance(exc, StorageNotFoundError) or (
             isinstance(exc, StorageError) and "不存在" in str(exc)
         )
+        download_limited = isinstance(exc, StorageDownloadLimitError)
         invalid_pdf = isinstance(exc, PDFParsingError) and (
             "页数不能超过" in str(exc) or "不是有效 PDF" in str(exc) or "无法打开 PDF" in str(exc)
         )
@@ -914,7 +925,7 @@ class DocumentProcessingService:
         )
         document.processing_status = (
             DocumentProcessingStatus.FAILED
-            if missing_source or invalid_pdf or exhausted
+            if missing_source or download_limited or invalid_pdf or exhausted
             else DocumentProcessingStatus.INTERRUPTED
         )
         document.processing_phase = (
@@ -1025,6 +1036,25 @@ class DocumentProcessingService:
         if workspace_id is not None:
             query = query.where(Project.workspace_id == workspace_id)
         return int(self._db.scalar(query) or 0)
+
+    def _mark_upload_confirmation_failed(self, document_id: uuid.UUID, exc: StorageError) -> None:
+        self._db.rollback()
+        document = self._db.get(Document, document_id)
+        if document is None:
+            return
+        document.processing_status = DocumentProcessingStatus.FAILED
+        document.processing_phase = "failed"
+        document.retry_not_before = None
+        document.lease_owner = None
+        document.lease_expires_at = None
+        document.error_message = self._safe_error(exc)
+        if isinstance(exc, StorageNotFoundError):
+            document.storage_key = None
+        project = self._db.get(Project, document.project_id)
+        if project is not None and not project.chapters:
+            project.status = ProjectStatus.FAILED
+        self._db.commit()
+        self._db.refresh(document)
 
     def _reject_uploaded_object(self, document: Document, message: str, *, quota: bool = False) -> None:
         if document.storage_key:
