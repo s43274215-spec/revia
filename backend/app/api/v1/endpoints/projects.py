@@ -8,7 +8,7 @@ from app.db.session import get_db
 from app.auth.dependencies import WritableWorkspaceId, WorkspaceId
 from app.core.config import Settings, get_settings
 from app.schemas.project import ActiveDocumentRead, ProjectCreate, ProjectRead, ProjectUpdate
-from app.services.projects import ProjectNotFoundError, ProjectService
+from app.services.projects import ProjectDeletionError, ProjectNotFoundError, ProjectService
 from app.services.storage import build_storage_provider
 
 router = APIRouter()
@@ -76,4 +76,6 @@ def delete_project(
         )
     except ProjectNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ProjectDeletionError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)

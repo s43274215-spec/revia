@@ -3,10 +3,11 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Icon } from "@/components/learning/icons";
-import { ActiveDocument, activeDocumentStatusLabel, BackendProject, cancelDocument, createProject, getActiveDocument, listProjects } from "@/lib/revia-api";
+import { ActiveDocument, activeDocumentStatusLabel, BackendProject, cancelDocument, createProject, deleteProject, getActiveDocument, listProjects } from "@/lib/revia-api";
 import { CreateProjectDialog } from "./create-project-dialog";
 import { SettingsTrigger } from "@/components/settings/settings-trigger";
 import { useAuth } from "@/components/auth/auth-provider";
+import { projectDeletionConfirmation, removeDeletedProject } from "@/lib/project-deletion";
 
 const dateFormatter = new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "long", day: "numeric" });
 const statusLabels: Record<BackendProject["status"], string> = {
@@ -29,6 +30,7 @@ export function ProjectDashboard() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [cancellingDocumentId, setCancellingDocumentId] = useState<string | null>(null);
+  const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -89,6 +91,22 @@ export function ProjectDashboard() {
     }
   };
 
+  const removeProject = async (project: BackendProject) => {
+    if (!window.confirm(projectDeletionConfirmation(project.name))) return;
+    setDeletingProjectId(project.id);
+    setError(null);
+    try {
+      await deleteProject(project.id);
+      const next = removeDeletedProject(projects, activeDocument, project.id);
+      setProjects(next.projects);
+      setActiveDocument(next.activeDocument);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "无法删除项目");
+    } finally {
+      setDeletingProjectId(null);
+    }
+  };
+
   return (
     <main className="entry-page">
       <header className="entry-header">
@@ -121,12 +139,20 @@ export function ProjectDashboard() {
           <div className="project-table-header"><span>课程名称</span><span>创建时间</span><span>当前状态</span><span /></div>
           {error && <div className="project-row"><span className="project-course"><span><strong>无法连接后端</strong><small>{error}</small></span></span></div>}
           {projects.map((project) => (
-            <button className="project-row" key={project.id} onClick={() => openProject(project)}>
+            <div className="project-row" key={project.id}>
               <span className="project-course"><i>{project.name.slice(0, 1)}</i><span><strong>{project.name}</strong><small>{project.description || "暂无课程描述"}</small></span></span>
               <span>{dateFormatter.format(new Date(project.created_at))}</span>
               <span><em className={`project-status ${project.status}`}>{statusLabels[project.status]}</em></span>
-              <span className="project-arrow">进入项目&nbsp; →</span>
-            </button>
+              <span className="project-actions">
+                {!isDemo && <button
+                  type="button"
+                  className="project-delete"
+                  disabled={deletingProjectId !== null}
+                  onClick={() => void removeProject(project)}
+                >{deletingProjectId === project.id ? "正在删除…" : "删除"}</button>}
+                <button type="button" className="project-enter" disabled={deletingProjectId === project.id} onClick={() => openProject(project)}>进入项目&nbsp; →</button>
+              </span>
+            </div>
           ))}
         </div>
       </section>
