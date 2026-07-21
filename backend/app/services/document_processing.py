@@ -8,7 +8,7 @@ from typing import Callable
 
 import fitz
 from fastapi import UploadFile
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.document.parser import (
@@ -36,7 +36,6 @@ from app.models.project import Document, Project
 from app.models.workspace import QuotaGuard, Workspace
 from app.services.storage import (
     LocalStorageProvider,
-    StorageDownloadLimitError,
     StorageError,
     StorageNotFoundError,
     StorageProvider,
@@ -89,19 +88,12 @@ ACTIVE_DOCUMENT_STATUSES = (
 
 QUEUE_DOCUMENT_STATUSES = (
     DocumentProcessingStatus.QUEUED,
-    DocumentProcessingStatus.PROCESSING,
-    DocumentProcessingStatus.PARSING,
-    DocumentProcessingStatus.INTERRUPTED,
 )
 
 # SQLite does not implement SELECT FOR UPDATE. This keeps local/test acceptance
 # deterministic; PostgreSQL uses the QuotaGuard row lock below.
 _quota_lock = RLock()
-_OCR_PAGE_RETRY_LIMIT = 3
-_OCR_RETRY_BASE_SECONDS = 60
-_OCR_RESOURCE_PAUSE_SECONDS = 3600
-_DOCUMENT_RETRY_BASE_SECONDS = 30
-_OCR_RESOURCE_MESSAGE = "OCR 处理因服务器资源不足暂停，系统稍后可从当前页继续。"
+_OCR_RESOURCE_MESSAGE = "OCR 处理因服务器资源不足停止，请稍后手动点击“继续识别”。"
 _OCR_DISABLED_REASON = "ocr_disabled"
 
 
@@ -385,7 +377,10 @@ class DocumentProcessingService:
         document_id: uuid.UUID,
     ) -> Document:
         document = self.get_document(workspace_id, project_id, document_id)
-        if document.processing_status != DocumentProcessingStatus.FAILED:
+        if document.processing_status not in {
+            DocumentProcessingStatus.FAILED,
+            DocumentProcessingStatus.INTERRUPTED,
+        }:
             raise DocumentResumeError("只有处理失败的 PDF 才能继续识别")
         if not document.storage_key:
             raise DocumentResumeError("原始 PDF 已不存在，请重新上传")
@@ -415,6 +410,26 @@ class DocumentProcessingService:
             if workspace is None:
                 self._db.rollback()
                 raise DocumentProjectNotFoundError("工作区不存在")
+            document = self._db.scalar(
+                select(Document)
+                .join(Project, Document.project_id == Project.id)
+                .where(
+                    Document.id == document_id,
+                    Document.project_id == project_id,
+                    Project.workspace_id == workspace_id,
+                )
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            if document is None:
+                self._db.rollback()
+                raise DocumentNotFoundError("文档不存在")
+            if document.processing_status not in {
+                DocumentProcessingStatus.FAILED,
+                DocumentProcessingStatus.INTERRUPTED,
+            }:
+                self._db.rollback()
+                raise DocumentResumeError("识别任务已经启动，请勿重复提交")
             if self._active_document_count(workspace_id, exclude_document_id=document.id) >= self._workspace_max_active_documents:
                 self._db.rollback()
                 raise DocumentQuotaError("当前已有一份资料正在排队或处理中，请完成后再继续识别。")
@@ -487,11 +502,6 @@ class DocumentProcessingService:
             try:
                 total_pages = self._parser.validate_document(pdf)
                 source_outline = self._parser.extract_outline(pdf)
-                retry_window_page = (
-                    document.current_page
-                    if document.processing_phase == "resource_limited"
-                    else None
-                )
                 document.total_pages = total_pages
                 document.processing_status = DocumentProcessingStatus.PROCESSING
                 completed_numbers = set(
@@ -528,10 +538,9 @@ class DocumentProcessingService:
                     if pdf is None:
                         pdf = fitz.open(local_path)
                     page = pdf.load_page(page_number - 1)
-                    allow_ocr = (
-                        page_record.retry_count < _OCR_PAGE_RETRY_LIMIT
-                        or page_number == retry_window_page
-                    )
+                    # Automatic retries are disabled. Each user-triggered processing
+                    # attempt may try OCR once for the current page.
+                    allow_ocr = True
                     try:
                         extracted = self._parser.extract_text_page(page, page_number)
                         if extracted is None and self._parser.requires_page_for_ocr:
@@ -637,13 +646,7 @@ class DocumentProcessingService:
                 update(Document)
                 .where(
                     Document.id == document_id,
-                    Document.processing_status.in_([
-                        DocumentProcessingStatus.QUEUED,
-                        DocumentProcessingStatus.PROCESSING,
-                        DocumentProcessingStatus.PARSING,
-                        DocumentProcessingStatus.INTERRUPTED,
-                    ]),
-                    or_(Document.retry_not_before.is_(None), Document.retry_not_before <= now),
+                    Document.processing_status == DocumentProcessingStatus.QUEUED,
                     or_(Document.lease_owner.is_(None), Document.lease_expires_at < now, Document.lease_owner == owner),
                 )
                 .values(
@@ -700,6 +703,7 @@ class DocumentProcessingService:
             return candidate.id
 
     def resume_incomplete(self) -> list[uuid.UUID]:
+        self.fail_stale_documents()
         completed: list[uuid.UUID] = []
         while True:
             owner = str(uuid.uuid4())
@@ -716,11 +720,11 @@ class DocumentProcessingService:
         return completed
 
     def queue_position(self, document: Document) -> int | None:
-        if document.processing_status not in {DocumentProcessingStatus.QUEUED, DocumentProcessingStatus.INTERRUPTED}:
+        if document.processing_status != DocumentProcessingStatus.QUEUED:
             return None
         ordered = list(self._db.scalars(
             select(Document.id)
-            .where(Document.processing_status.in_([DocumentProcessingStatus.QUEUED, DocumentProcessingStatus.INTERRUPTED]))
+            .where(Document.processing_status == DocumentProcessingStatus.QUEUED)
             .order_by(Document.queue_priority.asc(), Document.accepted_at.asc(), Document.created_at.asc())
         ).all())
         try:
@@ -896,6 +900,7 @@ class DocumentProcessingService:
         self._db.commit()
 
     def _mark_interrupted(self, document_id: uuid.UUID, owner: str, exc: Exception) -> None:
+        """Persist one failed attempt and wait for an explicit user resume."""
         self._db.rollback()
         document = self._db.get(Document, document_id)
         if document is None:
@@ -908,79 +913,74 @@ class DocumentProcessingService:
             return
         if document.lease_owner != owner:
             return
+
         document.retry_count = int(document.retry_count or 0) + 1
-        resource_limited = isinstance(exc, OCRResourceLimitedError)
-        ocr_disabled = isinstance(exc, OCRDisabledError)
-        missing_source = isinstance(exc, StorageNotFoundError) or (
-            isinstance(exc, StorageError) and "不存在" in str(exc)
-        )
-        download_limited = isinstance(exc, StorageDownloadLimitError)
-        invalid_pdf = isinstance(exc, PDFParsingError) and (
-            "页数不能超过" in str(exc) or "不是有效 PDF" in str(exc) or "无法打开 PDF" in str(exc)
-        )
-        exhausted = (
-            document.retry_count >= self._max_document_retries
-            and not isinstance(exc, SimulatedInterruption)
-            and not resource_limited
-        )
-        document.processing_status = (
-            DocumentProcessingStatus.FAILED
-            if missing_source or download_limited or invalid_pdf or exhausted
-            else DocumentProcessingStatus.INTERRUPTED
-        )
-        document.processing_phase = (
-            "failed"
-            if document.processing_status == DocumentProcessingStatus.FAILED
-            else "resource_limited"
-            if resource_limited
-            else "interrupted"
-        )
-        if document.processing_status == DocumentProcessingStatus.INTERRUPTED and document.total_pages:
+        document.processing_status = DocumentProcessingStatus.FAILED
+        document.processing_phase = "failed"
+        if document.total_pages:
             document.current_page = min(document.total_pages, document.processed_pages + 1)
-        if resource_limited:
-            page_attempts = int(self._db.scalar(
-                select(DocumentPage.retry_count).where(
-                    DocumentPage.document_id == document.id,
-                    DocumentPage.page_number == document.current_page,
-                )
-            ) or 0)
-            delay_seconds = (
-                _OCR_RESOURCE_PAUSE_SECONDS
-                if page_attempts >= _OCR_PAGE_RETRY_LIMIT - 1
-                else min(
-                    _OCR_RESOURCE_PAUSE_SECONDS,
-                    _OCR_RETRY_BASE_SECONDS * (2 ** max(0, page_attempts)),
-                )
-            )
-            document.retry_not_before = datetime.now(UTC) + timedelta(seconds=delay_seconds)
-            document.error_message = _OCR_DISABLED_REASON if ocr_disabled else _OCR_RESOURCE_MESSAGE
+        document.retry_not_before = None
+        if isinstance(exc, OCRDisabledError):
+            document.error_message = _OCR_DISABLED_REASON
+        elif isinstance(exc, OCRResourceLimitedError):
+            document.error_message = _OCR_RESOURCE_MESSAGE
         else:
-            document.retry_not_before = (
-                datetime.now(UTC) + timedelta(
-                    seconds=min(
-                        _OCR_RESOURCE_PAUSE_SECONDS,
-                        _DOCUMENT_RETRY_BASE_SECONDS * (2 ** max(0, document.retry_count - 1)),
-                    )
-                )
-                if (
-                    document.processing_status == DocumentProcessingStatus.INTERRUPTED
-                    and not isinstance(exc, SimulatedInterruption)
-                )
-                else None
-            )
             document.error_message = self._safe_error(exc)
         document.lease_owner = None
         document.lease_expires_at = None
+
         project = self._db.get(Project, document.project_id)
         if project is not None and not project.chapters:
-            project.status = (
-                ProjectStatus.FAILED
-                if document.processing_status == DocumentProcessingStatus.FAILED
-                else ProjectStatus.PROCESSING
-            )
-        if document.processing_status == DocumentProcessingStatus.FAILED:
-            self._release_quota_once(document)
+            project.status = ProjectStatus.FAILED
+        self._release_quota_once(document)
         self._db.commit()
+
+    def fail_stale_documents(self, document_id: uuid.UUID | None = None) -> list[uuid.UUID]:
+        """Convert abandoned/legacy processing states into manual-resume failures."""
+        now = datetime.now(UTC)
+        with _quota_lock:
+            self._lock_quota_guard()
+            query = select(Document).where(
+                or_(
+                    Document.processing_status == DocumentProcessingStatus.INTERRUPTED,
+                    and_(
+                        Document.processing_status.in_([
+                            DocumentProcessingStatus.PROCESSING,
+                            DocumentProcessingStatus.PARSING,
+                        ]),
+                        or_(
+                            Document.lease_owner.is_(None),
+                            Document.lease_expires_at.is_(None),
+                            Document.lease_expires_at < now,
+                        ),
+                    ),
+                )
+            )
+            if document_id is not None:
+                query = query.where(Document.id == document_id)
+            documents = list(self._db.scalars(
+                query.with_for_update(skip_locked=True)
+            ).all())
+            failed_ids: list[uuid.UUID] = []
+            for document in documents:
+                document.processing_status = DocumentProcessingStatus.FAILED
+                document.processing_phase = "failed"
+                if document.total_pages:
+                    document.current_page = min(document.total_pages, document.processed_pages + 1)
+                document.retry_not_before = None
+                document.lease_owner = None
+                document.lease_expires_at = None
+                message = (document.error_message or "").strip()
+                if "系统稍后可从当前页继续" in message:
+                    message = message.replace("系统稍后可从当前页继续", "请手动点击“继续识别”后从当前页重试")
+                document.error_message = message or "处理任务已中断，请点击“继续识别”后从断点继续。"
+                project = self._db.get(Project, document.project_id)
+                if project is not None and not project.chapters:
+                    project.status = ProjectStatus.FAILED
+                self._release_quota_once(document)
+                failed_ids.append(document.id)
+            self._db.commit()
+            return failed_ids
 
     def _count_pages(self, document_id: uuid.UUID, status: DocumentPageStatus) -> int:
         return int(self._db.scalar(

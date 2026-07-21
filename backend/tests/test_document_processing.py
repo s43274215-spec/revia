@@ -332,6 +332,50 @@ class DocumentUploadAPITests(unittest.TestCase):
             assert project is not None
             self.assertEqual(project.status, ProjectStatus.FAILED)
 
+    def test_refresh_converts_legacy_interrupted_document_to_manual_failure(self) -> None:
+        content = build_test_pdf()
+        document_id = uuid.uuid4()
+        object_key = build_object_key(self.workspace_id, document_id)
+        object_path = Path(self.storage.name, object_key)
+        object_path.parent.mkdir(parents=True, exist_ok=True)
+        object_path.write_bytes(content)
+        with self.Session() as session:
+            session.add(Document(
+                id=document_id,
+                project_id=self.project_id,
+                kind=DocumentKind.COURSE_MATERIAL,
+                original_name="legacy-interrupted.pdf",
+                mime_type="application/pdf",
+                size_bytes=len(content),
+                storage_key=object_key,
+                storage_backend="local",
+                processing_status=DocumentProcessingStatus.INTERRUPTED,
+                processing_phase="resource_limited",
+                total_pages=2,
+                processed_pages=1,
+                current_page=2,
+                retry_not_before=None,
+                error_message="OCR 处理因服务器资源不足暂停，系统稍后可从当前页继续。",
+            ))
+            session.commit()
+
+        response = self.client.get(
+            f"/api/v1/projects/{self.project_id}/documents/latest?kind=course_material"
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["processing_status"], "failed")
+        self.assertEqual(payload["processing_phase"], "failed")
+        self.assertTrue(payload["can_resume"])
+        self.assertEqual(payload["processed_pages"], 1)
+        self.assertIn("继续识别", payload["error_message"])
+        self.assertTrue(object_path.exists())
+        with self.Session() as session:
+            document = session.get(Document, document_id)
+            assert document is not None
+            self.assertEqual(document.processing_status, DocumentProcessingStatus.FAILED)
+            self.assertEqual(document.processed_pages, 1)
+
     def test_failed_document_resume_endpoint_requeues_and_processes_original_pdf(self) -> None:
         content = build_test_pdf()
         document_id = uuid.uuid4()
@@ -434,10 +478,10 @@ class DocumentUploadAPITests(unittest.TestCase):
                     upload,
                 ))
             failed = session.query(Document).filter_by(project_id=self.project_id).one()
-            self.assertEqual(failed.processing_status, DocumentProcessingStatus.INTERRUPTED)
-            self.assertEqual(failed.processing_phase, "resource_limited")
+            self.assertEqual(failed.processing_status, DocumentProcessingStatus.FAILED)
+            self.assertEqual(failed.processing_phase, "failed")
             self.assertEqual(failed.error_message, "ocr_disabled")
-            self.assertIsNotNone(failed.retry_not_before)
+            self.assertIsNone(failed.retry_not_before)
             self.assertIsNotNone(failed.storage_key)
             self.assertEqual(len(list(Path(self.storage.name).rglob("*.pdf"))), 1)
 

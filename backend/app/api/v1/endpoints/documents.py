@@ -234,6 +234,13 @@ def get_latest_document(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     if document is None:
         return None
+    if workspace.access_mode != "demo" and document.processing_status in {
+        DocumentProcessingStatus.PROCESSING,
+        DocumentProcessingStatus.PARSING,
+        DocumentProcessingStatus.INTERRUPTED,
+    }:
+        service.fail_stale_documents(document.id)
+        document = service.get_document(workspace.id, project_id, document.id)
     if workspace.access_mode != "demo" and document.processing_status == DocumentProcessingStatus.UPLOADED:
         try:
             document = service.confirm_upload(workspace.id, project_id, document.id)
@@ -257,6 +264,13 @@ def get_document_progress(
         document = service.get_document(workspace.id, project_id, document_id)
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    if workspace.access_mode != "demo" and document.processing_status in {
+        DocumentProcessingStatus.PROCESSING,
+        DocumentProcessingStatus.PARSING,
+        DocumentProcessingStatus.INTERRUPTED,
+    }:
+        service.fail_stale_documents(document.id)
+        document = service.get_document(workspace.id, project_id, document.id)
     if workspace.access_mode != "demo":
         _schedule_resume(document, runner, background_tasks)
     return _progress(document, service.queue_position(document))
@@ -391,18 +405,9 @@ def upsert_syllabus(
 
 
 def _schedule_resume(document: Document, runner: DocumentTaskRunner, background_tasks: BackgroundTasks) -> None:
-    if document.retry_not_before is not None:
-        retry_at = document.retry_not_before
-        if retry_at.tzinfo is None:
-            retry_at = retry_at.replace(tzinfo=UTC)
-        if retry_at > datetime.now(UTC):
-            return
-    if document.processing_status in {
-        DocumentProcessingStatus.QUEUED,
-        DocumentProcessingStatus.PROCESSING,
-        DocumentProcessingStatus.PARSING,
-        DocumentProcessingStatus.INTERRUPTED,
-    }:
+    # Only an explicitly queued first attempt or manual resume may start work.
+    # Failed/interrupted/in-flight records are never restarted by polling.
+    if document.processing_status == DocumentProcessingStatus.QUEUED:
         background_tasks.add_task(runner.run, document.id)
 
 
@@ -410,7 +415,10 @@ def _progress(document: Document, queue_position: int | None = None) -> Document
     payload = DocumentProgressRead.model_validate(document)
     payload.queue_position = queue_position
     payload.can_resume = (
-        document.processing_status == DocumentProcessingStatus.FAILED
+        document.processing_status in {
+            DocumentProcessingStatus.FAILED,
+            DocumentProcessingStatus.INTERRUPTED,
+        }
         and document.storage_key is not None
     )
     payload.is_resuming = document.processing_phase == "resuming" or (
@@ -418,7 +426,6 @@ def _progress(document: Document, queue_position: int | None = None) -> Document
         and document.processing_status in {
             DocumentProcessingStatus.QUEUED,
             DocumentProcessingStatus.PROCESSING,
-            DocumentProcessingStatus.INTERRUPTED,
         }
     )
     return payload

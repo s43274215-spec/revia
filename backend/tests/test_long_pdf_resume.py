@@ -2,6 +2,7 @@ import tempfile
 import time
 import unittest
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import fitz
@@ -24,7 +25,7 @@ from app.models.enums import (
 )
 from app.models.project import Document, Project
 from app.models.workspace import Workspace
-from app.services.document_processing import DocumentProcessingError, DocumentProcessingService
+from app.services.document_processing import DocumentProcessingError, DocumentProcessingService, DocumentResumeError
 from app.services.storage import (
     LocalStorageProvider,
     S3StorageProvider,
@@ -243,13 +244,17 @@ class LongPDFResumeTests(unittest.TestCase):
                 )
             interrupted = first_db.get(Document, document_id)
             assert interrupted is not None
-            self.assertEqual(interrupted.processing_status, DocumentProcessingStatus.INTERRUPTED)
+            self.assertEqual(interrupted.processing_status, DocumentProcessingStatus.FAILED)
+            self.assertEqual(interrupted.processing_phase, "failed")
+            self.assertIsNone(interrupted.retry_not_before)
             self.assertEqual(interrupted.processed_pages, 137)
             self.assertEqual(interrupted.current_page, 138)
             self.assertIsNotNone(interrupted.storage_key)
 
         with self.Session() as restarted_db:
             service = self._service(restarted_db, splitter=wide_splitter)
+            queued = service.resume_failed_document(self.workspace_id, self.project_id, document_id)
+            self.assertEqual(queued.processing_status, DocumentProcessingStatus.QUEUED)
             resumed = service.process_document(document_id)
             self.assertEqual(resumed.processing_status, DocumentProcessingStatus.PARSED)
             pages = list(restarted_db.scalars(
@@ -658,6 +663,8 @@ class LongPDFResumeTests(unittest.TestCase):
             self.assertEqual(queued.current_page, 3)
             self.assertEqual(queued.retry_count, 0)
             self.assertIsNone(queued.error_message)
+            with self.assertRaisesRegex(DocumentResumeError, "只有处理失败"):
+                service.resume_failed_document(self.workspace_id, self.project_id, document_id)
             project = db.get(Project, self.project_id)
             assert project is not None
             self.assertEqual(project.status, ProjectStatus.PROCESSING)
@@ -672,6 +679,59 @@ class LongPDFResumeTests(unittest.TestCase):
             self.assertEqual([page.page_number for page in pages], [1, 2, 3])
             self.assertEqual(pages[0].extracted_text, "saved page 1")
             self.assertEqual(pages[1].extracted_text, "saved page 2")
+
+
+    def test_stale_second_resume_request_cannot_queue_duplicate_attempt(self) -> None:
+        document_id = self._document(3)
+        with self.Session() as setup_db:
+            document = setup_db.get(Document, document_id)
+            assert document is not None
+            document.processing_status = DocumentProcessingStatus.FAILED
+            document.processing_phase = "failed"
+            document.total_pages = 3
+            document.current_page = 1
+            document.error_message = "temporary failure"
+            setup_db.commit()
+
+        with self.Session() as first_db, self.Session() as stale_db:
+            first_service = self._service(first_db)
+            stale_service = self._service(stale_db)
+            stale = stale_service.get_document(self.workspace_id, self.project_id, document_id)
+            self.assertEqual(stale.processing_status, DocumentProcessingStatus.FAILED)
+
+            queued = first_service.resume_failed_document(self.workspace_id, self.project_id, document_id)
+            self.assertEqual(queued.processing_status, DocumentProcessingStatus.QUEUED)
+            with self.assertRaisesRegex(DocumentResumeError, "已经启动"):
+                stale_service.resume_failed_document(self.workspace_id, self.project_id, document_id)
+
+            stored = stale_db.get(Document, document_id)
+            assert stored is not None
+            self.assertEqual(stored.processing_status, DocumentProcessingStatus.QUEUED)
+
+    def test_expired_processing_lease_becomes_manual_failure_without_auto_download(self) -> None:
+        document_id = self._document(3)
+        with self.Session() as db:
+            document = db.get(Document, document_id)
+            assert document is not None
+            document.processing_status = DocumentProcessingStatus.PROCESSING
+            document.processing_phase = "extracting"
+            document.lease_owner = "dead-render-worker"
+            document.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            document.total_pages = 3
+            document.processed_pages = 1
+            document.current_page = 2
+            db.commit()
+
+            service = self._service(db)
+            self.assertEqual(service.resume_incomplete(), [])
+            failed = db.get(Document, document_id)
+            assert failed is not None
+            self.assertEqual(failed.processing_status, DocumentProcessingStatus.FAILED)
+            self.assertEqual(failed.processing_phase, "failed")
+            self.assertEqual(failed.current_page, 2)
+            self.assertIsNone(failed.retry_not_before)
+            self.assertIn("继续识别", failed.error_message or "")
+            self.assertIsNotNone(failed.storage_key)
 
     def test_missing_resume_object_marks_document_failed_instead_of_stuck_processing(self) -> None:
         document_id = uuid.uuid4()
@@ -690,12 +750,15 @@ class LongPDFResumeTests(unittest.TestCase):
                 processing_phase="interrupted",
             ))
             db.commit()
-            with self.assertRaisesRegex(DocumentProcessingError, "已不存在"):
-                self._service(db).process_document(document_id)
+            service = self._service(db)
+            self.assertEqual(service.fail_stale_documents(), [document_id])
             failed = db.get(Document, document_id)
             assert failed is not None
             self.assertEqual(failed.processing_status, DocumentProcessingStatus.FAILED)
             self.assertEqual(failed.processing_phase, "failed")
+            self.assertIsNone(failed.retry_not_before)
+            with self.assertRaisesRegex(DocumentResumeError, "已不存在"):
+                service.resume_failed_document(self.workspace_id, self.project_id, document_id)
 
 
 if __name__ == "__main__":

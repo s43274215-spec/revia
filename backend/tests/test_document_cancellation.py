@@ -244,7 +244,7 @@ class DocumentCancellationTests(unittest.TestCase):
             self.assertIsNone(document.lease_owner)
             self.assertIsNone(document.lease_expires_at)
 
-    def test_non_resource_failure_uses_retry_backoff(self) -> None:
+    def test_non_resource_failure_waits_for_manual_resume(self) -> None:
         owner = "failing-worker"
         with self.Session() as db:
             document = db.get(Document, self.document_id)
@@ -257,10 +257,11 @@ class DocumentCancellationTests(unittest.TestCase):
             db.commit()
             self._service(db)._mark_interrupted(self.document_id, owner, RuntimeError("safe parse failure"))
             db.refresh(document)
-            self.assertEqual(document.processing_status, DocumentProcessingStatus.INTERRUPTED)
-            self.assertEqual(document.processing_phase, "interrupted")
-            self.assertIsNotNone(document.retry_not_before)
+            self.assertEqual(document.processing_status, DocumentProcessingStatus.FAILED)
+            self.assertEqual(document.processing_phase, "failed")
+            self.assertIsNone(document.retry_not_before)
             self.assertEqual(document.error_message, "safe parse failure")
+            self.assertIsNone(self._service(db).claim_next("automatic-retry-worker"))
 
     def test_object_delete_failure_does_not_rollback_cancellation(self) -> None:
         with self.Session() as db:

@@ -465,32 +465,31 @@ class OCRResourceRecoveryTests(unittest.TestCase):
             lease_seconds=30,
         )
 
-    def test_resource_failures_back_off_then_resume_without_duplicates(self) -> None:
+    def test_resource_failure_waits_for_manual_resume_without_duplicates(self) -> None:
         with self.Session() as db:
             for attempt in range(3):
                 if attempt:
-                    document = db.get(Document, self.document_id)
-                    assert document is not None
-                    document.retry_not_before = datetime.now(UTC) - timedelta(seconds=1)
-                    db.commit()
+                    self._service(db, FailingOCRWorker()).resume_failed_document(
+                        self.workspace_id, self.project_id, self.document_id
+                    )
                 with self.assertRaisesRegex(DocumentProcessingError, "OCR 处理因服务器资源不足暂停"):
                     self._service(db, FailingOCRWorker()).process_document(self.document_id)
 
             document = db.get(Document, self.document_id)
             assert document is not None
-            self.assertEqual(document.processing_status, DocumentProcessingStatus.INTERRUPTED)
-            self.assertEqual(document.processing_phase, "resource_limited")
-            self.assertEqual(document.error_message, "OCR 处理因服务器资源不足暂停，系统稍后可从当前页继续。")
-            self.assertIsNotNone(document.retry_not_before)
+            self.assertEqual(document.processing_status, DocumentProcessingStatus.FAILED)
+            self.assertEqual(document.processing_phase, "failed")
+            self.assertEqual(document.error_message, "OCR 处理因服务器资源不足停止，请稍后手动点击“继续识别”。")
+            self.assertIsNone(document.retry_not_before)
             self.assertIsNotNone(document.storage_key)
             page = db.scalar(select(DocumentPage).where(DocumentPage.document_id == self.document_id))
             assert page is not None
             self.assertEqual(page.retry_count, 2)
-            self.assertIsNone(self._service(db, FailingOCRWorker()).claim_next("immediate-worker"))
+            self.assertIsNone(self._service(db, FailingOCRWorker()).claim_next("automatic-worker"))
 
-            document.retry_not_before = datetime.now(UTC) - timedelta(seconds=1)
-            db.commit()
-            completed = self._service(db, SuccessfulOCRWorker()).process_document(self.document_id)
+            successful_service = self._service(db, SuccessfulOCRWorker())
+            successful_service.resume_failed_document(self.workspace_id, self.project_id, self.document_id)
+            completed = successful_service.process_document(self.document_id)
             self.assertEqual(completed.processing_status, DocumentProcessingStatus.PARSED)
             self.assertEqual(completed.processed_pages, 1)
             self.assertEqual(completed.ocr_page_count, 1)
@@ -506,32 +505,31 @@ class OCRResourceRecoveryTests(unittest.TestCase):
                 0,
             )
 
-    def test_ocr_disabled_pauses_then_resumes_without_duplicate_pages_or_chunks(self) -> None:
+    def test_ocr_disabled_waits_for_manual_resume_without_duplicate_pages_or_chunks(self) -> None:
         with self.Session() as db:
             for attempt in range(4):
                 if attempt:
-                    document = db.get(Document, self.document_id)
-                    assert document is not None
-                    document.retry_not_before = datetime.now(UTC) - timedelta(seconds=1)
-                    db.commit()
+                    self._service(db, ocr_enabled=False).resume_failed_document(
+                        self.workspace_id, self.project_id, self.document_id
+                    )
                 with self.assertRaisesRegex(DocumentProcessingError, "ocr_disabled"):
                     self._service(db, ocr_enabled=False).process_document(self.document_id)
 
             document = db.get(Document, self.document_id)
             assert document is not None
-            self.assertEqual(document.processing_status, DocumentProcessingStatus.INTERRUPTED)
-            self.assertEqual(document.processing_phase, "resource_limited")
+            self.assertEqual(document.processing_status, DocumentProcessingStatus.FAILED)
+            self.assertEqual(document.processing_phase, "failed")
             self.assertEqual(document.error_message, "ocr_disabled")
-            self.assertIsNotNone(document.retry_not_before)
+            self.assertIsNone(document.retry_not_before)
             self.assertIsNotNone(document.storage_key)
 
             page = db.scalar(select(DocumentPage).where(DocumentPage.document_id == self.document_id))
             assert page is not None
             self.assertNotEqual(page.status.value, "completed")
 
-            document.retry_not_before = datetime.now(UTC) - timedelta(seconds=1)
-            db.commit()
-            completed = self._service(db, SuccessfulOCRWorker()).process_document(self.document_id)
+            successful_service = self._service(db, SuccessfulOCRWorker())
+            successful_service.resume_failed_document(self.workspace_id, self.project_id, self.document_id)
+            completed = successful_service.process_document(self.document_id)
             self.assertEqual(completed.processing_status, DocumentProcessingStatus.PARSED)
             self.assertEqual(completed.processed_pages, 1)
             self.assertEqual(
@@ -607,14 +605,14 @@ class OCRResourceRecoveryTests(unittest.TestCase):
 
             interrupted = db.get(Document, self.document_id)
             assert interrupted is not None
-            self.assertEqual(interrupted.processing_status, DocumentProcessingStatus.INTERRUPTED)
+            self.assertEqual(interrupted.processing_status, DocumentProcessingStatus.FAILED)
+            self.assertEqual(interrupted.processing_phase, "failed")
+            self.assertIsNone(interrupted.retry_not_before)
             self.assertEqual(interrupted.processed_pages, 1)
             self.assertEqual(failing_worker.calls, [1, 2])
             self.assertEqual(first_parser.parent_closed_before_ocr, [True, True])
             self.assertEqual(len(set(first_parser.parent_document_ids)), 2)
 
-            interrupted.retry_not_before = datetime.now(UTC) - timedelta(seconds=1)
-            db.commit()
             resumed_worker = RecordingOCRWorker()
             resumed_parser = ParentPDFReleaseProbeParser(resumed_worker)
             resumed_service = DocumentProcessingService(
@@ -625,6 +623,7 @@ class OCRResourceRecoveryTests(unittest.TestCase):
                 StructuredTextSplitter(),
                 lease_seconds=30,
             )
+            resumed_service.resume_failed_document(self.workspace_id, self.project_id, self.document_id)
             completed = resumed_service.process_document(self.document_id)
             self.assertEqual(completed.processing_status, DocumentProcessingStatus.PARSED)
             self.assertEqual(completed.processed_pages, 2)
