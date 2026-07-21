@@ -28,6 +28,9 @@ _WORKER_LOGGER = logging.getLogger("revia.ocr.worker")
 _OCR_RENDER_MAX_WIDTH_PX = 960
 _OCR_TILE_HEIGHT_PX = 256
 _OCR_TILE_OVERLAP_PX = 32
+# Bound each subprocess to one tile. This trades speed for predictable memory
+# on Render's 512 MB free instance and lets a page resume across workers.
+_OCR_TILES_PER_WORKER = 1
 
 
 class OCRUnavailableError(RuntimeError):
@@ -105,126 +108,197 @@ class OCRWorkerClient:
         return bool(self._process and self._process.is_alive())
 
     def recognize_page(self, path: Path, page_number: int, dpi: int) -> OCRPageResult:
-        self._ensure_started(path, page_number)
-        assert self._connection is not None
-        assert self._process is not None
-        peak_rss = 0.0
-        container_peak_rss = 0.0
-        container_peak_working_set = 0.0
-        last_stage = "worker_started"
-        try:
-            self._connection.send({
-                "command": "recognize",
-                "path": str(path),
-                "page_number": page_number,
-                "dpi": dpi,
-            })
-        except (BrokenPipeError, EOFError, OSError) as exc:
-            self._raise_resource_failure(
-                page_number,
-                reason="send_failed",
-                peak_rss=peak_rss,
-                container_peak_rss=container_peak_rss,
-                container_peak_working_set=container_peak_working_set,
-                last_stage=last_stage,
-                broken_pipe=True,
-                cause=exc,
-            )
+        # A single complex scanned page can contain many OCR bands. ONNX Runtime
+        # may retain native inference buffers until the worker exits, so a page
+        # must be allowed to continue across fresh workers instead of forcing one
+        # process to hold every band until the page is complete.
+        combined_lines: list[str] = []
+        start_top_points = 0.0
+        segment_index = 0
+        page_peak_rss = 0.0
+        page_container_peak_rss = 0.0
+        page_container_peak_working_set = 0.0
+        page_threshold_exceeded = False
+        first_baseline_rss = 0.0
+        engine_initialized_rss = 0.0
+        page_rendered_rss = 0.0
+        final_worker_rss = 0.0
+        initialized = False
+        engine_version = "unknown"
 
-        deadline = time.monotonic() + self._timeout_seconds
-        threshold_exceeded = False
-        recycle_rss_mb = self._max_rss_mb * 0.9
-        recycle_container_mb = self._container_memory_budget_mb * 0.9
-        payload: dict[str, object] | None = None
-        while time.monotonic() < deadline:
-            rss = process_rss_mb(self._process.pid)
-            peak_rss = max(peak_rss, rss)
-            memory = container_memory_snapshot()
-            current_container_rss = memory.current_mb
-            current_working_set = memory.working_set_mb
-            if current_working_set <= 0:
-                current_working_set = process_rss_mb() + rss
-            if current_container_rss <= 0:
-                current_container_rss = current_working_set
-            container_peak_rss = max(container_peak_rss, current_container_rss)
-            container_peak_working_set = max(container_peak_working_set, current_working_set)
-            threshold_exceeded = (
-                threshold_exceeded
-                or rss >= recycle_rss_mb
-                or current_working_set >= recycle_container_mb
-            )
-            if current_working_set >= self._container_memory_budget_mb:
+        while True:
+            segment_index += 1
+            self._ensure_started(path, page_number)
+            assert self._connection is not None
+            assert self._process is not None
+            peak_rss = 0.0
+            container_peak_rss = 0.0
+            container_peak_working_set = 0.0
+            last_stage = "worker_started"
+            try:
+                self._connection.send({
+                    "command": "recognize",
+                    "path": str(path),
+                    "page_number": page_number,
+                    "dpi": dpi,
+                    "start_top_points": start_top_points,
+                })
+            except (BrokenPipeError, EOFError, OSError) as exc:
                 self._raise_resource_failure(
                     page_number,
-                    reason="container_memory_limit",
+                    reason="send_failed",
                     peak_rss=peak_rss,
                     container_peak_rss=container_peak_rss,
                     container_peak_working_set=container_peak_working_set,
                     last_stage=last_stage,
+                    broken_pipe=True,
+                    cause=exc,
                 )
-            if self._connection.poll(0.1):
-                try:
-                    received = self._connection.recv()
-                except (EOFError, OSError) as exc:
+
+            deadline = time.monotonic() + self._timeout_seconds
+            threshold_exceeded = False
+            recycle_rss_mb = self._max_rss_mb * 0.9
+            recycle_container_mb = self._container_memory_budget_mb * 0.9
+            payload: dict[str, object] | None = None
+            while time.monotonic() < deadline:
+                rss = process_rss_mb(self._process.pid)
+                peak_rss = max(peak_rss, rss)
+                memory = container_memory_snapshot()
+                current_container_rss = memory.current_mb
+                current_working_set = memory.working_set_mb
+                if current_working_set <= 0:
+                    current_working_set = process_rss_mb() + rss
+                if current_container_rss <= 0:
+                    current_container_rss = current_working_set
+                container_peak_rss = max(container_peak_rss, current_container_rss)
+                container_peak_working_set = max(container_peak_working_set, current_working_set)
+                threshold_exceeded = (
+                    threshold_exceeded
+                    or rss >= recycle_rss_mb
+                    or current_working_set >= recycle_container_mb
+                )
+                if current_working_set >= self._container_memory_budget_mb:
                     self._raise_resource_failure(
                         page_number,
-                        reason="receive_failed",
+                        reason="container_memory_limit",
                         peak_rss=peak_rss,
                         container_peak_rss=container_peak_rss,
                         container_peak_working_set=container_peak_working_set,
                         last_stage=last_stage,
-                        broken_pipe=True,
-                        cause=exc,
                     )
-                if received.get("event") == "stage":
-                    last_stage = str(received.get("stage") or "unknown")[:64]
-                    peak_rss = max(peak_rss, float(received.get("rss_mb") or 0.0))
-                    continue
-                payload = received
-                break
-            if not self._process.is_alive():
+                if self._connection.poll(0.1):
+                    try:
+                        received = self._connection.recv()
+                    except (EOFError, OSError) as exc:
+                        self._raise_resource_failure(
+                            page_number,
+                            reason="receive_failed",
+                            peak_rss=peak_rss,
+                            container_peak_rss=container_peak_rss,
+                            container_peak_working_set=container_peak_working_set,
+                            last_stage=last_stage,
+                            broken_pipe=True,
+                            cause=exc,
+                        )
+                    if received.get("event") == "stage":
+                        last_stage = str(received.get("stage") or "unknown")[:64]
+                        peak_rss = max(peak_rss, float(received.get("rss_mb") or 0.0))
+                        continue
+                    payload = received
+                    break
+                if not self._process.is_alive():
+                    self._raise_resource_failure(
+                        page_number,
+                        reason="worker_exited",
+                        peak_rss=peak_rss,
+                        container_peak_rss=container_peak_rss,
+                        container_peak_working_set=container_peak_working_set,
+                        last_stage=last_stage,
+                    )
+            if payload is None:
                 self._raise_resource_failure(
                     page_number,
-                    reason="worker_exited",
+                    reason="timeout",
                     peak_rss=peak_rss,
                     container_peak_rss=container_peak_rss,
                     container_peak_working_set=container_peak_working_set,
                     last_stage=last_stage,
+                    timeout=True,
                 )
-        if payload is None:
-            self._raise_resource_failure(
-                page_number,
-                reason="timeout",
-                peak_rss=peak_rss,
-                container_peak_rss=container_peak_rss,
-                container_peak_working_set=container_peak_working_set,
-                last_stage=last_stage,
-                timeout=True,
-            )
 
-        log_ocr_memory("worker_peak_observed", page_number, True, rss_mb=peak_rss)
-        if not bool(payload.get("ok")):
-            error = str(payload.get("error") or "OCR 子进程返回未知错误")[:300]
+            log_ocr_memory("worker_peak_observed", page_number, True, rss_mb=peak_rss)
+            if not bool(payload.get("ok")):
+                error = str(payload.get("error") or "OCR 子进程返回未知错误")[:300]
+                self.close(force=True)
+                raise OCRWorkerError(error)
+
+            segment_text = str(payload.get("text") or "")
+            for raw_line in segment_text.splitlines():
+                line = raw_line.strip()
+                if line and (not combined_lines or line != combined_lines[-1]):
+                    combined_lines.append(line)
+
+            page_peak_rss = max(page_peak_rss, peak_rss)
+            page_container_peak_rss = max(page_container_peak_rss, container_peak_rss)
+            page_container_peak_working_set = max(
+                page_container_peak_working_set,
+                container_peak_working_set,
+            )
+            page_threshold_exceeded = page_threshold_exceeded or threshold_exceeded
+            final_worker_rss = float(payload.get("rss_mb") or 0.0)
+            if first_baseline_rss <= 0:
+                first_baseline_rss = float(payload.get("baseline_rss_mb") or 0.0)
+            engine_initialized_rss = max(
+                engine_initialized_rss,
+                float(payload.get("engine_rss_mb") or 0.0),
+            )
+            page_rendered_rss = max(
+                page_rendered_rss,
+                float(payload.get("render_rss_mb") or 0.0),
+            )
+            initialized = initialized or bool(payload.get("initialized"))
+            engine_version = str(payload.get("engine_version") or engine_version)
+
+            if not bool(payload.get("partial")):
+                break
+
+            next_top_points = float(payload.get("next_top_points") or 0.0)
+            if next_top_points <= start_top_points + 0.01:
+                self.close(force=True)
+                raise OCRWorkerError("OCR 分块断点没有前进")
+            _WORKER_LOGGER.warning(
+                "ocr_worker_checkpoint page=%d segment=%d next_top_points=%.1f "
+                "worker_peak_rss_mb=%.1f container_peak_working_set_mb=%.1f",
+                page_number,
+                segment_index,
+                next_top_points,
+                peak_rss,
+                container_peak_working_set,
+            )
+            start_top_points = next_top_points
+            # The worker intentionally returns after a bounded tile batch. Close
+            # it before the next segment so ONNX native buffers are reclaimed by
+            # process exit rather than accumulating across the whole page.
             self.close(force=True)
-            raise OCRWorkerError(error)
 
         self._processed_pages += 1
+        text = "\n".join(combined_lines)
         result = OCRPageResult(
-            page_number=int(payload["page_number"]),
-            text=str(payload.get("text") or ""),
-            character_count=int(payload.get("character_count") or 0),
-            worker_rss_mb=float(payload.get("rss_mb") or 0.0),
-            worker_peak_rss_mb=peak_rss,
-            worker_baseline_rss_mb=float(payload.get("baseline_rss_mb") or 0.0),
-            engine_initialized_rss_mb=float(payload.get("engine_rss_mb") or 0.0),
-            page_rendered_rss_mb=float(payload.get("render_rss_mb") or 0.0),
-            initialized=bool(payload.get("initialized")),
-            engine_version=str(payload.get("engine_version") or "unknown"),
-            container_peak_rss_mb=container_peak_rss,
-            container_peak_working_set_mb=container_peak_working_set,
+            page_number=page_number,
+            text=text,
+            character_count=len(text),
+            worker_rss_mb=final_worker_rss,
+            worker_peak_rss_mb=page_peak_rss,
+            worker_baseline_rss_mb=first_baseline_rss,
+            engine_initialized_rss_mb=engine_initialized_rss,
+            page_rendered_rss_mb=page_rendered_rss,
+            initialized=initialized,
+            engine_version=engine_version,
+            container_peak_rss_mb=page_container_peak_rss,
+            container_peak_working_set_mb=page_container_peak_working_set,
         )
         if (
-            threshold_exceeded
+            page_threshold_exceeded
             or self._processed_pages >= self._max_pages
             or bool(payload.get("retire_after_page"))
         ):
@@ -349,6 +423,7 @@ def _rapidocr_worker(connection: Connection, max_rss_mb: int, threads: int) -> N
             page_number = int(message["page_number"])
             path = Path(str(message["path"]))
             dpi = int(message["dpi"])
+            start_top_points = max(0.0, float(message.get("start_top_points") or 0.0))
             try:
                 baseline_rss_mb = _report_worker_stage(
                     connection, "worker_received_page", page_number, initialized
@@ -370,6 +445,9 @@ def _rapidocr_worker(connection: Connection, max_rss_mb: int, threads: int) -> N
 
                 lines: list[str] = []
                 render_rss_mb = engine_rss_mb
+                partial = False
+                next_top_points = 0.0
+                tile_count = 0
                 _report_worker_stage(connection, "worker_pdf_opening", page_number, True)
                 document = fitz.open(path)
                 page = document.load_page(page_number - 1)
@@ -379,7 +457,7 @@ def _rapidocr_worker(connection: Connection, max_rss_mb: int, threads: int) -> N
                         page.rect.width, dpi
                     )
                     matrix = fitz.Matrix(scale, scale)
-                    top = 0.0
+                    top = min(start_top_points, page.rect.height)
                     while top < page.rect.height:
                         bottom = min(page.rect.height, top + band_height_points)
                         clip = fitz.Rect(page.rect.x0, top, page.rect.x1, bottom)
@@ -409,13 +487,18 @@ def _rapidocr_worker(connection: Connection, max_rss_mb: int, threads: int) -> N
                         del result
                         del tile_bytes
                         # ONNX Runtime and image decoding use native allocations.
-                        # gc.collect() alone does not reliably return those pages to
-                        # the container between bands, so trim after every tile.
+                        # Release what the allocator can return, then checkpoint
+                        # the page before another tile can accumulate more buffers.
                         release_process_memory()
                         _report_worker_stage(connection, "worker_tile_completed", page_number, True)
+                        tile_count += 1
                         if bottom >= page.rect.height:
                             break
-                        top = bottom - overlap_points
+                        next_top_points = bottom - overlap_points
+                        if tile_count >= _OCR_TILES_PER_WORKER:
+                            partial = True
+                            break
+                        top = next_top_points
                 finally:
                     page = None
                     document.close()
@@ -423,7 +506,12 @@ def _rapidocr_worker(connection: Connection, max_rss_mb: int, threads: int) -> N
                 text = "\n".join(lines)
                 del lines
                 release_process_memory()
-                rss_mb = _report_worker_stage(connection, "worker_page_completed", page_number, True)
+                rss_mb = _report_worker_stage(
+                    connection,
+                    "worker_segment_completed" if partial else "worker_page_completed",
+                    page_number,
+                    True,
+                )
                 connection.send({
                     "event": "result",
                     "ok": True,
@@ -436,9 +524,14 @@ def _rapidocr_worker(connection: Connection, max_rss_mb: int, threads: int) -> N
                     "render_rss_mb": render_rss_mb,
                     "initialized": True,
                     "engine_version": engine_version,
+                    "partial": partial,
+                    "next_top_points": next_top_points,
                     "retire_after_page": rss_mb >= max_rss_mb * 0.9,
                 })
-                if rss_mb >= max_rss_mb * 0.9:
+                # A partial result is a deliberate process boundary. Exiting here
+                # guarantees all native ONNX buffers are returned before the next
+                # tile of the same page starts in a fresh worker.
+                if partial or rss_mb >= max_rss_mb * 0.9:
                     break
             except Exception as exc:
                 connection.send({

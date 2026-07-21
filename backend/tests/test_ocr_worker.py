@@ -35,6 +35,7 @@ from app.document.ocr import (
     _OCR_RENDER_MAX_WIDTH_PX,
     _OCR_TILE_HEIGHT_PX,
     _OCR_TILE_OVERLAP_PX,
+    _OCR_TILES_PER_WORKER,
     _ocr_tile_geometry,
 )
 from app.document.parser import PDFParser
@@ -128,6 +129,9 @@ class OCRTileGeometryTests(unittest.TestCase):
         self.assertAlmostEqual(scale, 2.0)
         self.assertAlmostEqual(band_height_points, 128.0)
         self.assertAlmostEqual(overlap_points, 16.0)
+
+    def test_each_worker_is_bounded_to_one_tile(self) -> None:
+        self.assertEqual(_OCR_TILES_PER_WORKER, 1)
 
 
 class OCRWorkerIsolationTests(unittest.TestCase):
@@ -239,6 +243,105 @@ class OCRWorkerIsolationTests(unittest.TestCase):
             drop_cache.assert_called_once_with(Path("private.pdf"))
         finally:
             client.close(force=True)
+
+    def test_page_continues_across_fresh_workers_without_duplicate_overlap(self) -> None:
+        client = OCRWorkerClient(
+            max_rss_mb=300,
+            max_pages=10,
+            container_memory_budget_mb=480,
+            threads=1,
+            timeout_seconds=180,
+        )
+        payloads = [
+            {
+                "event": "result",
+                "ok": True,
+                "page_number": 7,
+                "text": "第一段\n重叠行",
+                "character_count": 8,
+                "rss_mb": 190.0,
+                "baseline_rss_mb": 70.0,
+                "engine_rss_mb": 165.0,
+                "render_rss_mb": 175.0,
+                "initialized": True,
+                "engine_version": "test",
+                "partial": True,
+                "next_top_points": 120.0,
+                "retire_after_page": False,
+            },
+            {
+                "event": "result",
+                "ok": True,
+                "page_number": 7,
+                "text": "重叠行\n第二段",
+                "character_count": 8,
+                "rss_mb": 188.0,
+                "baseline_rss_mb": 71.0,
+                "engine_rss_mb": 166.0,
+                "render_rss_mb": 176.0,
+                "initialized": True,
+                "engine_version": "test",
+                "partial": False,
+                "next_top_points": 0.0,
+                "retire_after_page": False,
+            },
+        ]
+        sent_messages: list[dict[str, object]] = []
+        starts: list[int] = []
+
+        class RunningProcess:
+            pid = os.getpid()
+            exitcode = None
+
+            @staticmethod
+            def is_alive() -> bool:
+                return True
+
+        class ResultConnection:
+            def __init__(self, payload: dict[str, object]) -> None:
+                self.payload = payload
+
+            def send(self, message) -> None:
+                sent_messages.append(message)
+
+            @staticmethod
+            def poll(timeout=None) -> bool:
+                return True
+
+            def recv(self):
+                return self.payload
+
+        def ensure_started(path: Path, page_number: int) -> None:
+            starts.append(page_number)
+            client._process = RunningProcess()
+            client._connection = ResultConnection(payloads.pop(0))
+
+        def fake_close(*, force: bool = False) -> None:
+            client._connection = None
+            client._process = None
+            client._processed_pages = 0
+
+        client._ensure_started = ensure_started
+        with (
+            patch("app.document.ocr.process_rss_mb", return_value=80.0),
+            patch(
+                "app.document.ocr.container_memory_snapshot",
+                return_value=ContainerMemorySnapshot(220.0, 220.0, 0.0),
+            ),
+            patch.object(client, "close", side_effect=fake_close) as close,
+            self.assertLogs("revia.ocr.worker", level="WARNING") as captured,
+        ):
+            result = client.recognize_page(Path("private.pdf"), 7, 144)
+
+        self.assertEqual(result.text, "第一段\n重叠行\n第二段")
+        self.assertEqual(result.character_count, len(result.text))
+        self.assertEqual(starts, [7, 7])
+        self.assertEqual(sent_messages[0]["start_top_points"], 0.0)
+        self.assertEqual(sent_messages[1]["start_top_points"], 120.0)
+        close.assert_called_once_with(force=True)
+        diagnostic = "\n".join(captured.output)
+        self.assertIn("ocr_worker_checkpoint page=7 segment=1", diagnostic)
+        self.assertNotIn("private.pdf", diagnostic)
 
     def test_worker_recycles_after_soft_rss_limit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
