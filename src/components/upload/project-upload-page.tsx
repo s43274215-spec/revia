@@ -399,12 +399,12 @@ export function ProjectUploadPage({ projectId }: { projectId: string }) {
               <span>{recoverySummary.canResume ? "也可以在下方重新上传新的 PDF。" : "请在下方重新上传原 PDF。"}</span>
             </div>
           </div>}
-          <FileDropZone title={failedCourseDocument ? "重新上传课程资料" : "拖拽完整课程资料到这里"} hint={failedCourseDocument ? "仅在不继续原任务时使用；会创建新的处理记录" : "或点击选择文件，仅支持单个 PDF"} kind="course_material" files={courseFiles} onFiles={setCourseFiles} />
+          <FileDropZone title={failedCourseDocument ? "重新上传课程资料" : "拖拽完整课程资料到这里"} hint={failedCourseDocument ? "仅在不继续原任务时使用；会创建新的处理记录" : "或点击选择文件，仅支持单个 PDF"} kind="course_material" files={courseFiles} onFiles={setCourseFiles} removable={!generating && !submitted} />
         </div>
         <div className="upload-section">
           <div className="upload-section-label"><span>02</span><div><h2>填写考试范围</h2><p>上传考纲 PDF，或直接输入考纲内容。</p></div></div>
           <div className="syllabus-grid">
-            <FileDropZone title="上传考纲" hint="拖拽或点击选择 PDF" kind="syllabus" files={syllabusFiles} onFiles={setSyllabusFiles} />
+            <FileDropZone title="上传考纲" hint="拖拽或点击选择 PDF" kind="syllabus" files={syllabusFiles} onFiles={setSyllabusFiles} removable={!generating && !submitted} />
             <div className="syllabus-text"><label htmlFor="syllabus-text">直接输入考纲</label><textarea id="syllabus-text" value={syllabusText} onChange={(event) => setSyllabusText(event.target.value)} placeholder="例如：第三章外部性、公共物品；第四章财政政策……" /></div>
           </div>
         </div>

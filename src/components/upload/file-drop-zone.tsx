@@ -10,7 +10,7 @@ export type SelectedPDF = {
   file: File;
 };
 
-export function FileDropZone({ title, hint, kind, multiple = false, files, onFiles }: { title: string; hint: string; kind: SelectedPDF["kind"]; multiple?: boolean; files: SelectedPDF[]; onFiles: (files: SelectedPDF[]) => void }) {
+export function FileDropZone({ title, hint, kind, multiple = false, files, onFiles, removable = false }: { title: string; hint: string; kind: SelectedPDF["kind"]; multiple?: boolean; files: SelectedPDF[]; onFiles: (files: SelectedPDF[]) => void; removable?: boolean }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
@@ -32,6 +32,11 @@ export function FileDropZone({ title, hint, kind, multiple = false, files, onFil
     onFiles(multiple ? [...files, ...mapped] : mapped.slice(0, 1));
   };
   const drop = (event: DragEvent) => { event.preventDefault(); setDragging(false); accept(event.dataTransfer.files); };
+  const removeFile = (fileId: string) => {
+    if (!removable) return;
+    onFiles(files.filter((file) => file.id !== fileId));
+    if (inputRef.current) inputRef.current.value = "";
+  };
 
   return (
     <div className={`file-drop-zone ${dragging ? "is-dragging" : ""}`} onDragEnter={(event) => { event.preventDefault(); setDragging(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={() => setDragging(false)} onDrop={drop}>
@@ -42,7 +47,7 @@ export function FileDropZone({ title, hint, kind, multiple = false, files, onFil
       <button type="button" onClick={() => inputRef.current?.click()}>选择 PDF</button>
       {validationError && <p className="file-validation-error" role="alert">{validationError}</p>}
       {files.length > 0 && <div className="selected-files">
-        {files.map((file) => <div key={file.id}><span>PDF</span><p><strong>{file.name}</strong><small>{(file.size / 1024 / 1024).toFixed(2)} MB</small></p></div>)}
+        {files.map((file) => <div key={file.id}><span>PDF</span><p><strong>{file.name}</strong><small>{(file.size / 1024 / 1024).toFixed(2)} MB</small></p>{removable && <button type="button" className="selected-file-remove" aria-label={`删除 ${file.name}`} title={`删除 ${file.name}`} onClick={() => removeFile(file.id)}><svg aria-hidden="true" viewBox="0 0 24 24" fill="none"><path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13M10 11v5m4-5v5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg></button>}</div>)}
       </div>}
     </div>
   );
