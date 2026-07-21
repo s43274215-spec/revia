@@ -94,6 +94,68 @@ class OCRWorkerIsolationTests(unittest.TestCase):
         self.assertNotIn("rapidocr", sys.modules)
         self.assertNotIn("onnxruntime", sys.modules)
 
+    def test_worker_releases_parent_memory_before_spawn(self) -> None:
+        events: list[str] = []
+
+        class FakeConnection:
+            def send(self, message) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+        class FakeProcess:
+            pid = 12345
+            exitcode = None
+
+            def __init__(self) -> None:
+                self.alive = False
+
+            def start(self) -> None:
+                events.append("start")
+                self.alive = True
+
+            def is_alive(self) -> bool:
+                return self.alive
+
+            def join(self, timeout=None) -> None:
+                return None
+
+            def terminate(self) -> None:
+                self.alive = False
+
+            def kill(self) -> None:
+                self.alive = False
+
+        class FakeContext:
+            def Pipe(self):
+                return FakeConnection(), FakeConnection()
+
+            def Process(self, **kwargs):
+                return FakeProcess()
+
+        client = OCRWorkerClient()
+        try:
+            with (
+                patch("app.document.ocr.release_process_memory", side_effect=lambda: events.append("release")) as release,
+                patch("app.document.ocr.process_rss_mb", side_effect=[210.0, 165.0]),
+                patch("app.document.ocr.container_memory_mb", side_effect=[440.0, 390.0]),
+                patch("app.document.ocr.get_context", return_value=FakeContext()),
+                self.assertLogs("revia.ocr.worker", level="INFO") as captured,
+            ):
+                client._ensure_started(7)
+
+            release.assert_called_once_with()
+            self.assertLess(events.index("release"), events.index("start"))
+            diagnostic = "\n".join(captured.output)
+            self.assertIn("ocr_parent_cleanup page=7", diagnostic)
+            self.assertIn("parent_rss_before_mb=210.0", diagnostic)
+            self.assertIn("parent_rss_after_mb=165.0", diagnostic)
+            self.assertIn("container_before_mb=440.0", diagnostic)
+            self.assertIn("container_after_mb=390.0", diagnostic)
+        finally:
+            client.close(force=True)
+
     def test_worker_recycles_after_soft_rss_limit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "scanned.pdf"

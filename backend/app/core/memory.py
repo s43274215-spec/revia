@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import ctypes
+import gc
 import logging
 import os
+import sys
 from pathlib import Path
 
 
@@ -45,6 +47,22 @@ def container_memory_mb() -> float:
         except (OSError, ValueError):
             continue
     return 0.0
+
+
+def release_process_memory() -> None:
+    """Best-effort release of Python and glibc free memory in the current process."""
+    gc.collect()
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        malloc_trim = ctypes.CDLL(None).malloc_trim
+        malloc_trim.argtypes = [ctypes.c_size_t]
+        malloc_trim.restype = ctypes.c_int
+        malloc_trim(0)
+    except Exception:
+        # Non-glibc Linux images may not expose malloc_trim. Cleanup must never
+        # change the durable task result.
+        return
 
 
 def log_ocr_memory(stage: str, page_number: int, initialized: bool, *, rss_mb: float | None = None) -> float:

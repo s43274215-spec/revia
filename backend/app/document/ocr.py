@@ -10,7 +10,12 @@ from multiprocessing import get_context
 from multiprocessing.connection import Connection
 from pathlib import Path
 
-from app.core.memory import container_memory_mb, log_ocr_memory, process_rss_mb
+from app.core.memory import (
+    container_memory_mb,
+    log_ocr_memory,
+    process_rss_mb,
+    release_process_memory,
+)
 
 
 _WORKER_LOGGER = logging.getLogger("revia.ocr.worker")
@@ -259,7 +264,21 @@ class OCRWorkerClient:
         if self._process is not None and self._process.is_alive():
             return
         self.close(force=True)
-        log_ocr_memory("before_worker_spawn", page_number, False)
+        parent_before_mb = process_rss_mb()
+        container_before_mb = container_memory_mb()
+        release_process_memory()
+        parent_after_mb = process_rss_mb()
+        container_after_mb = container_memory_mb()
+        _WORKER_LOGGER.info(
+            "ocr_parent_cleanup page=%d parent_rss_before_mb=%.1f "
+            "parent_rss_after_mb=%.1f container_before_mb=%.1f container_after_mb=%.1f",
+            page_number,
+            parent_before_mb,
+            parent_after_mb,
+            container_before_mb,
+            container_after_mb,
+        )
+        log_ocr_memory("before_worker_spawn", page_number, False, rss_mb=parent_after_mb)
         context = get_context("spawn")
         parent_connection, child_connection = context.Pipe()
         process = context.Process(
