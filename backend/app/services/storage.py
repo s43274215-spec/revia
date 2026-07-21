@@ -66,6 +66,8 @@ class StorageProvider(Protocol):
 
     def download_to_temp(self, object_key: str) -> Path: ...
 
+    def create_download_url(self, object_key: str, *, expires_in: int) -> str: ...
+
     def delete_object(self, object_key: str) -> None: ...
 
     def object_exists(self, object_key: str) -> bool: ...
@@ -206,6 +208,14 @@ class LocalStorageProvider:
             raise StorageNotFoundError("原始 PDF 已不存在，无法继续解析")
         return path
 
+    def create_download_url(self, object_key: str, *, expires_in: int) -> str:
+        if expires_in <= 0:
+            raise StorageError("下载地址有效期必须为正数")
+        path = self.resolve(object_key)
+        if not path.is_file():
+            raise StorageNotFoundError("原始 PDF 已不存在")
+        return path.as_uri()
+
     def delete_object(self, object_key: str) -> None:
         self.resolve(object_key).unlink(missing_ok=True)
 
@@ -338,6 +348,20 @@ class S3StorageProvider:
             close = getattr(body, "close", None)
             if callable(close):
                 close()
+
+    def create_download_url(self, object_key: str, *, expires_in: int) -> str:
+        if expires_in <= 0:
+            raise StorageError("下载地址有效期必须为正数")
+        try:
+            return str(self._client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": self._bucket, "Key": object_key},
+                ExpiresIn=expires_in,
+            ))
+        except Exception as exc:
+            raise StorageUnavailableError(
+                f"无法生成对象存储下载地址（{self._safe_error_code(exc)}）"
+            ) from exc
 
     def delete_object(self, object_key: str) -> None:
         self._client.delete_object(Bucket=self._bucket, Key=object_key)

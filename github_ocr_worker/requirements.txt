@@ -1,0 +1,4 @@
+PyMuPDF>=1.24,<2.0
+httpx>=0.27,<1.0
+rapidocr>=3.4,<4
+onnxruntime>=1.18,<2

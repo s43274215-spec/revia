@@ -1,0 +1,49 @@
+name: Revia OCR Worker
+on:
+  workflow_dispatch:
+    inputs:
+      document_id:
+        description: Revia document UUID
+        required: true
+        type: string
+      attempt_id:
+        description: Revia OCR attempt UUID
+        required: true
+        type: string
+concurrency:
+  group: revia-ocr-${{ inputs.document_id }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  ocr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    env:
+      REVIA_API_BASE_URL: ${{ secrets.REVIA_API_BASE_URL }}
+      REVIA_OCR_WORKER_KEY: ${{ secrets.REVIA_OCR_WORKER_KEY }}
+      REVIA_DOCUMENT_ID: ${{ inputs.document_id }}
+      REVIA_ATTEMPT_ID: ${{ inputs.attempt_id }}
+      OCR_THREADS: "2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: github_ocr_worker/requirements.txt
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r github_ocr_worker/requirements.txt
+      - name: Process OCR document
+        run: python -m github_ocr_worker.worker
+      - name: Report workflow-level failure
+        if: failure()
+        shell: bash
+        run: |
+          curl --silent --show-error --fail-with-body \
+            --request POST \
+            --header "Authorization: Bearer ${REVIA_OCR_WORKER_KEY}" \
+            --header "Content-Type: application/json" \
+            --data "{\"attempt_id\":\"${REVIA_ATTEMPT_ID}\",\"error_message\":\"GitHub OCR 工作流在启动或执行阶段失败，请手动继续识别。\"}" \
+            "${REVIA_API_BASE_URL%/}/api/v1/internal/ocr/jobs/${REVIA_DOCUMENT_ID}/fail" \
+            || true

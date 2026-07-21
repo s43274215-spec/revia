@@ -11,6 +11,7 @@ from fastapi import UploadFile
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import Session
 
+from app.document.github_ocr import GitHubOCRDispatchError, GitHubOCRDispatcher
 from app.document.parser import (
     OCRDisabledError,
     OCRResourceLimitedError,
@@ -115,6 +116,8 @@ class DocumentProcessingService:
         global_max_processing_documents: int = 1,
         global_rolling_24h_page_limit: int = 3000,
         memory_diagnostics_enabled: bool = False,
+        external_ocr_dispatcher: GitHubOCRDispatcher | None = None,
+        external_ocr_lease_seconds: int = 900,
     ) -> None:
         self._db = db
         self._storage = storage
@@ -130,6 +133,8 @@ class DocumentProcessingService:
         self._global_max_processing_documents = global_max_processing_documents
         self._global_rolling_24h_page_limit = global_rolling_24h_page_limit
         self._memory_diagnostics_enabled = memory_diagnostics_enabled
+        self._external_ocr_dispatcher = external_ocr_dispatcher
+        self._external_ocr_lease_seconds = external_ocr_lease_seconds
 
     def create_upload(
         self,
@@ -543,6 +548,15 @@ class DocumentProcessingService:
                     allow_ocr = True
                     try:
                         extracted = self._parser.extract_text_page(page, page_number)
+                        if extracted is None and self._external_ocr_dispatcher is not None:
+                            if pdf is not None:
+                                pdf.close()
+                                pdf = None
+                            return self._handoff_to_external_ocr(
+                                document,
+                                page_record,
+                                page_number,
+                            )
                         if extracted is None and self._parser.requires_page_for_ocr:
                             document.processing_phase = "ocr"
                             self._db.commit()
@@ -770,6 +784,81 @@ class DocumentProcessingService:
                 self._db.commit()
             raise DocumentProcessingError(str(exc)) from exc
 
+    def finalize_external_document(
+        self,
+        document_id: uuid.UUID,
+        *,
+        owner: str,
+        source_outline: tuple[SourceOutlineEntry, ...] = (),
+    ) -> Document:
+        document = self._db.get(Document, document_id)
+        if document is None:
+            raise DocumentNotFoundError("文档不存在")
+        if document.lease_owner != owner:
+            raise LeaseUnavailableError("外部 OCR 租约已失效")
+        return self._finalize_document(document_id, owner, source_outline)
+
+    @staticmethod
+    def release_quota_if_unused(document: Document) -> bool:
+        return DocumentProcessingService._release_quota_once(document)
+
+    def _handoff_to_external_ocr(
+        self,
+        document: Document,
+        page_record: DocumentPage,
+        page_number: int,
+    ) -> Document:
+        dispatcher = self._external_ocr_dispatcher
+        if dispatcher is None:
+            raise DocumentProcessingError("外部 OCR 调度器未配置")
+        attempt_id = uuid.uuid4()
+        owner = f"github:{attempt_id}"
+        page_record.status = DocumentPageStatus.PENDING
+        page_record.started_at = None
+        page_record.completed_at = None
+        page_record.error_message = None
+        document.processing_status = DocumentProcessingStatus.PROCESSING
+        document.processing_phase = "external_ocr_queued"
+        document.current_page = page_number
+        document.error_message = None
+        document.retry_not_before = None
+        document.lease_owner = owner
+        document.lease_expires_at = datetime.now(UTC) + timedelta(seconds=self._external_ocr_lease_seconds)
+        self._db.commit()
+        try:
+            dispatcher.dispatch(document.id, attempt_id)
+        except GitHubOCRDispatchError as exc:
+            self._db.rollback()
+            failed = self._db.get(Document, document.id)
+            if failed is None:
+                raise DocumentNotFoundError("文档不存在") from exc
+            if failed.lease_owner == owner:
+                failed.processing_status = DocumentProcessingStatus.FAILED
+                failed.processing_phase = "failed"
+                failed.error_message = self._safe_error(exc)
+                failed.retry_not_before = None
+                failed.lease_owner = None
+                failed.lease_expires_at = None
+                failed_page = self._db.scalar(
+                    select(DocumentPage).where(
+                        DocumentPage.document_id == failed.id,
+                        DocumentPage.page_number == page_number,
+                    )
+                )
+                if failed_page is not None and failed_page.status != DocumentPageStatus.COMPLETED:
+                    failed_page.status = DocumentPageStatus.FAILED
+                    failed_page.error_message = self._safe_error(exc)
+                    failed_page.completed_at = datetime.now(UTC)
+                project = self._db.get(Project, failed.project_id)
+                if project is not None and not project.chapters:
+                    project.status = ProjectStatus.FAILED
+                self._release_quota_once(failed)
+                self._db.commit()
+            self._db.refresh(failed)
+            return failed
+        self._db.refresh(document)
+        return document
+
     def _finalize_document(
         self,
         document_id: uuid.UUID,
@@ -963,6 +1052,7 @@ class DocumentProcessingService:
             ).all())
             failed_ids: list[uuid.UUID] = []
             for document in documents:
+                was_external_ocr = document.processing_phase.startswith("external_ocr")
                 document.processing_status = DocumentProcessingStatus.FAILED
                 document.processing_phase = "failed"
                 if document.total_pages:
@@ -973,6 +1063,8 @@ class DocumentProcessingService:
                 message = (document.error_message or "").strip()
                 if "系统稍后可从当前页继续" in message:
                     message = message.replace("系统稍后可从当前页继续", "请手动点击“继续识别”后从当前页重试")
+                if was_external_ocr and not message:
+                    message = "云端 OCR 任务已中断，请点击“继续识别”后从断点继续。"
                 document.error_message = message or "处理任务已中断，请点击“继续识别”后从断点继续。"
                 project = self._db.get(Project, document.project_id)
                 if project is not None and not project.chapters:

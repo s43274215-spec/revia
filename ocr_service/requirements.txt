@@ -1,4 +1,0 @@
-fastapi==0.116.1
-uvicorn[standard]==0.35.0
-rapidocr>=3.4,<4
-onnxruntime>=1.18,<2

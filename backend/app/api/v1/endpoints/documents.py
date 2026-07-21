@@ -13,7 +13,7 @@ from app.auth.dependencies import CurrentWorkspace, WritableWorkspaceId, Workspa
 from app.core.config import Settings, get_settings
 from app.db.session import get_db
 from app.document.parser import PDFParser
-from app.document.remote_ocr import RemoteOCREngine
+from app.document.github_ocr import GitHubOCRDispatcher
 from app.document.splitter import StructuredTextSplitter
 from app.document.structure import TextStructurer
 from app.models.enums import DocumentKind, DocumentProcessingStatus
@@ -50,14 +50,15 @@ router = APIRouter()
 
 
 def build_document_processing_service(db: Session, settings: Settings) -> DocumentProcessingService:
-    remote_ocr = (
-        RemoteOCREngine(
-            base_url=settings.remote_ocr_url,
-            api_key=settings.remote_ocr_api_key,
-            timeout_seconds=settings.remote_ocr_timeout_seconds,
-            max_image_bytes=settings.remote_ocr_max_image_mb * 1024 * 1024,
+    dispatcher = (
+        GitHubOCRDispatcher(
+            token=settings.github_ocr_token,
+            repository=settings.github_ocr_repository,
+            workflow=settings.github_ocr_workflow,
+            ref=settings.github_ocr_ref,
+            timeout_seconds=settings.github_ocr_api_timeout_seconds,
         )
-        if settings.remote_ocr_url
+        if settings.github_ocr_enabled
         else None
     )
     return DocumentProcessingService(
@@ -68,7 +69,6 @@ def build_document_processing_service(db: Session, settings: Settings) -> Docume
             ocr_dpi=settings.ocr_dpi,
             minimum_text_length=settings.ocr_minimum_text_length,
             max_pages=settings.max_pdf_pages,
-            ocr_engine=remote_ocr,
             ocr_worker_max_rss_mb=settings.ocr_worker_max_rss_mb,
             ocr_worker_max_pages=settings.ocr_worker_max_pages,
             ocr_container_memory_budget_mb=settings.ocr_container_memory_budget_mb,
@@ -85,6 +85,8 @@ def build_document_processing_service(db: Session, settings: Settings) -> Docume
         global_max_processing_documents=settings.global_max_processing_documents,
         global_rolling_24h_page_limit=settings.global_rolling_24h_page_limit,
         memory_diagnostics_enabled=settings.document_memory_diagnostics_enabled,
+        external_ocr_dispatcher=dispatcher,
+        external_ocr_lease_seconds=settings.github_ocr_lease_seconds,
     )
 
 

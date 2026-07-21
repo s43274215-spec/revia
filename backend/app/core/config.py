@@ -55,10 +55,14 @@ class Settings(BaseSettings):
     ocr_container_memory_budget_mb: int = 480
     ocr_worker_threads: int = 1
     ocr_worker_timeout_seconds: int = 180
-    remote_ocr_url: str = ""
-    remote_ocr_api_key: str = ""
-    remote_ocr_timeout_seconds: int = 300
-    remote_ocr_max_image_mb: int = 20
+    github_ocr_token: str = ""
+    github_ocr_repository: str = ""
+    github_ocr_workflow: str = "revia-ocr.yml"
+    github_ocr_ref: str = "main"
+    github_ocr_worker_key: str = ""
+    github_ocr_api_timeout_seconds: int = 30
+    github_ocr_lease_seconds: int = 900
+    github_ocr_download_url_expires_seconds: int = 900
     document_memory_diagnostics_enabled: bool = False
     max_upload_mb: int = 150
     max_pdf_pages: int = 600
@@ -114,12 +118,24 @@ class Settings(BaseSettings):
             self.ocr_container_memory_budget_mb,
             self.ocr_worker_threads,
             self.ocr_worker_timeout_seconds,
-            self.remote_ocr_timeout_seconds,
-            self.remote_ocr_max_image_mb,
+            self.github_ocr_api_timeout_seconds,
+            self.github_ocr_lease_seconds,
+            self.github_ocr_download_url_expires_seconds,
         ) <= 0:
             raise ValueError("OCR limits must be positive integers")
-        if bool(self.remote_ocr_url.strip()) != bool(self.remote_ocr_api_key.strip()):
-            raise ValueError("REMOTE_OCR_URL and REMOTE_OCR_API_KEY must be configured together")
+        github_values = {
+            "GITHUB_OCR_TOKEN": self.github_ocr_token.strip(),
+            "GITHUB_OCR_REPOSITORY": self.github_ocr_repository.strip(),
+            "GITHUB_OCR_WORKER_KEY": self.github_ocr_worker_key.strip(),
+        }
+        configured_count = sum(bool(value) for value in github_values.values())
+        if configured_count not in {0, len(github_values)}:
+            missing = [name for name, value in github_values.items() if not value]
+            raise ValueError(f"GitHub OCR configuration is incomplete: {', '.join(missing)}")
+        if self.github_ocr_repository and self.github_ocr_repository.count("/") != 1:
+            raise ValueError("GITHUB_OCR_REPOSITORY must use OWNER/REPO format")
+        if not self.github_ocr_workflow.strip() or not self.github_ocr_ref.strip():
+            raise ValueError("GITHUB_OCR_WORKFLOW and GITHUB_OCR_REF cannot be empty")
         if min(
             self.workspace_max_active_documents,
             self.workspace_rolling_24h_page_limit,
@@ -175,6 +191,14 @@ class Settings(BaseSettings):
             if s3_missing:
                 raise ValueError(f"Production S3 configuration is missing: {', '.join(s3_missing)}")
         return self
+
+    @property
+    def github_ocr_enabled(self) -> bool:
+        return bool(
+            self.github_ocr_token.strip()
+            and self.github_ocr_repository.strip()
+            and self.github_ocr_worker_key.strip()
+        )
 
     @property
     def effective_owner_access_code(self) -> str:
