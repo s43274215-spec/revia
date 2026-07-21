@@ -288,6 +288,10 @@ class PDFParser:
         if self._ocr_worker is not None:
             self._ocr_worker.close()
             self._ocr_worker = None
+        if self._ocr_engine is not None:
+            close = getattr(self._ocr_engine, "close", None)
+            if callable(close):
+                close()
 
     @staticmethod
     def _safe_error(exc: Exception) -> str:

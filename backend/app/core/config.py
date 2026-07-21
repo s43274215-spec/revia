@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     ocr_container_memory_budget_mb: int = 480
     ocr_worker_threads: int = 1
     ocr_worker_timeout_seconds: int = 180
+    remote_ocr_url: str = ""
+    remote_ocr_api_key: str = ""
+    remote_ocr_timeout_seconds: int = 300
+    remote_ocr_max_image_mb: int = 20
     document_memory_diagnostics_enabled: bool = False
     max_upload_mb: int = 150
     max_pdf_pages: int = 600
@@ -110,8 +114,12 @@ class Settings(BaseSettings):
             self.ocr_container_memory_budget_mb,
             self.ocr_worker_threads,
             self.ocr_worker_timeout_seconds,
+            self.remote_ocr_timeout_seconds,
+            self.remote_ocr_max_image_mb,
         ) <= 0:
-            raise ValueError("OCR worker limits must be positive integers")
+            raise ValueError("OCR limits must be positive integers")
+        if bool(self.remote_ocr_url.strip()) != bool(self.remote_ocr_api_key.strip()):
+            raise ValueError("REMOTE_OCR_URL and REMOTE_OCR_API_KEY must be configured together")
         if min(
             self.workspace_max_active_documents,
             self.workspace_rolling_24h_page_limit,
