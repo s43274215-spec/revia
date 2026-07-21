@@ -28,7 +28,15 @@ from app.core.memory import (
 from app.core.config import Settings, get_settings
 from app.db.base import Base
 from app.db.session import get_db
-from app.document.ocr import OCRPageResult, OCRWorkerClient, OCRWorkerResourceError
+from app.document.ocr import (
+    OCRPageResult,
+    OCRWorkerClient,
+    OCRWorkerResourceError,
+    _OCR_RENDER_MAX_WIDTH_PX,
+    _OCR_TILE_HEIGHT_PX,
+    _OCR_TILE_OVERLAP_PX,
+    _ocr_tile_geometry,
+)
 from app.document.parser import PDFParser
 from app.document.splitter import StructuredTextSplitter
 from app.document.structure import TextStructurer
@@ -103,6 +111,23 @@ class MemoryAccountingTests(unittest.TestCase):
         open_file.assert_called_once_with(path, os.O_RDONLY)
         advise.assert_called_once_with(17, 0, 0, dont_need)
         close_file.assert_called_once_with(17)
+
+
+class OCRTileGeometryTests(unittest.TestCase):
+    def test_tiles_cap_width_and_height_for_a4_scan(self) -> None:
+        scale, band_height_points, overlap_points = _ocr_tile_geometry(595.0, 144)
+
+        self.assertLessEqual(595.0 * scale, _OCR_RENDER_MAX_WIDTH_PX + 0.01)
+        self.assertAlmostEqual(band_height_points * scale, _OCR_TILE_HEIGHT_PX, places=4)
+        self.assertAlmostEqual(overlap_points * scale, _OCR_TILE_OVERLAP_PX, places=4)
+        self.assertLessEqual(_OCR_RENDER_MAX_WIDTH_PX * _OCR_TILE_HEIGHT_PX, 245_760)
+
+    def test_tiles_keep_requested_dpi_for_narrow_pages(self) -> None:
+        scale, band_height_points, overlap_points = _ocr_tile_geometry(300.0, 144)
+
+        self.assertAlmostEqual(scale, 2.0)
+        self.assertAlmostEqual(band_height_points, 128.0)
+        self.assertAlmostEqual(overlap_points, 16.0)
 
 
 class OCRWorkerIsolationTests(unittest.TestCase):

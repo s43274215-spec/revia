@@ -21,6 +21,14 @@ from app.core.memory import (
 
 _WORKER_LOGGER = logging.getLogger("revia.ocr.worker")
 
+# Render OCR pages in deliberately small bands. RapidOCR's detector can
+# temporarily allocate several copies of the input tensor; keeping each band
+# below this pixel budget prevents a single complex page from exhausting a
+# 512 MB Render instance during tile inference.
+_OCR_RENDER_MAX_WIDTH_PX = 960
+_OCR_TILE_HEIGHT_PX = 256
+_OCR_TILE_OVERLAP_PX = 32
+
 
 class OCRUnavailableError(RuntimeError):
     pass
@@ -367,11 +375,10 @@ def _rapidocr_worker(connection: Connection, max_rss_mb: int, threads: int) -> N
                 page = document.load_page(page_number - 1)
                 _report_worker_stage(connection, "worker_pdf_opened", page_number, True)
                 try:
-                    requested_scale = dpi / 72.0
-                    scale = min(requested_scale, 1400 / max(1.0, page.rect.width))
+                    scale, band_height_points, overlap_points = _ocr_tile_geometry(
+                        page.rect.width, dpi
+                    )
                     matrix = fitz.Matrix(scale, scale)
-                    band_height_points = 600 / scale
-                    overlap_points = 24 / scale
                     top = 0.0
                     while top < page.rect.height:
                         bottom = min(page.rect.height, top + band_height_points)
@@ -401,7 +408,10 @@ def _rapidocr_worker(connection: Connection, max_rss_mb: int, threads: int) -> N
                         del texts
                         del result
                         del tile_bytes
-                        gc.collect()
+                        # ONNX Runtime and image decoding use native allocations.
+                        # gc.collect() alone does not reliably return those pages to
+                        # the container between bands, so trim after every tile.
+                        release_process_memory()
                         _report_worker_stage(connection, "worker_tile_completed", page_number, True)
                         if bottom >= page.rect.height:
                             break
@@ -412,7 +422,7 @@ def _rapidocr_worker(connection: Connection, max_rss_mb: int, threads: int) -> N
                     del document
                 text = "\n".join(lines)
                 del lines
-                gc.collect()
+                release_process_memory()
                 rss_mb = _report_worker_stage(connection, "worker_page_completed", page_number, True)
                 connection.send({
                     "event": "result",
@@ -460,6 +470,20 @@ def _report_worker_stage(
         "rss_mb": rss_mb,
     })
     return rss_mb
+
+
+def _ocr_tile_geometry(page_width_points: float, dpi: int) -> tuple[float, float, float]:
+    """Return scale, band height, and overlap in PDF points for safe OCR tiles."""
+    requested_scale = max(0.1, dpi / 72.0)
+    scale = min(
+        requested_scale,
+        _OCR_RENDER_MAX_WIDTH_PX / max(1.0, float(page_width_points)),
+    )
+    return (
+        scale,
+        _OCR_TILE_HEIGHT_PX / scale,
+        _OCR_TILE_OVERLAP_PX / scale,
+    )
 
 
 def _configure_worker_threads(threads: int) -> None:
