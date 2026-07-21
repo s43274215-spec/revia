@@ -11,7 +11,8 @@ from multiprocessing.connection import Connection
 from pathlib import Path
 
 from app.core.memory import (
-    container_memory_mb,
+    container_memory_snapshot,
+    drop_file_cache,
     log_ocr_memory,
     process_rss_mb,
     release_process_memory,
@@ -46,6 +47,7 @@ class OCRPageResult:
     initialized: bool
     engine_version: str
     container_peak_rss_mb: float = 0.0
+    container_peak_working_set_mb: float = 0.0
 
 
 class RapidOCREngine:
@@ -95,11 +97,12 @@ class OCRWorkerClient:
         return bool(self._process and self._process.is_alive())
 
     def recognize_page(self, path: Path, page_number: int, dpi: int) -> OCRPageResult:
-        self._ensure_started(page_number)
+        self._ensure_started(path, page_number)
         assert self._connection is not None
         assert self._process is not None
         peak_rss = 0.0
         container_peak_rss = 0.0
+        container_peak_working_set = 0.0
         last_stage = "worker_started"
         try:
             self._connection.send({
@@ -114,6 +117,7 @@ class OCRWorkerClient:
                 reason="send_failed",
                 peak_rss=peak_rss,
                 container_peak_rss=container_peak_rss,
+                container_peak_working_set=container_peak_working_set,
                 last_stage=last_stage,
                 broken_pipe=True,
                 cause=exc,
@@ -127,17 +131,27 @@ class OCRWorkerClient:
         while time.monotonic() < deadline:
             rss = process_rss_mb(self._process.pid)
             peak_rss = max(peak_rss, rss)
-            current_container_rss = container_memory_mb()
+            memory = container_memory_snapshot()
+            current_container_rss = memory.current_mb
+            current_working_set = memory.working_set_mb
+            if current_working_set <= 0:
+                current_working_set = process_rss_mb() + rss
             if current_container_rss <= 0:
-                current_container_rss = process_rss_mb() + rss
+                current_container_rss = current_working_set
             container_peak_rss = max(container_peak_rss, current_container_rss)
-            threshold_exceeded = threshold_exceeded or rss >= recycle_rss_mb or current_container_rss >= recycle_container_mb
-            if current_container_rss >= self._container_memory_budget_mb:
+            container_peak_working_set = max(container_peak_working_set, current_working_set)
+            threshold_exceeded = (
+                threshold_exceeded
+                or rss >= recycle_rss_mb
+                or current_working_set >= recycle_container_mb
+            )
+            if current_working_set >= self._container_memory_budget_mb:
                 self._raise_resource_failure(
                     page_number,
                     reason="container_memory_limit",
                     peak_rss=peak_rss,
                     container_peak_rss=container_peak_rss,
+                    container_peak_working_set=container_peak_working_set,
                     last_stage=last_stage,
                 )
             if self._connection.poll(0.1):
@@ -149,6 +163,7 @@ class OCRWorkerClient:
                         reason="receive_failed",
                         peak_rss=peak_rss,
                         container_peak_rss=container_peak_rss,
+                        container_peak_working_set=container_peak_working_set,
                         last_stage=last_stage,
                         broken_pipe=True,
                         cause=exc,
@@ -165,6 +180,7 @@ class OCRWorkerClient:
                     reason="worker_exited",
                     peak_rss=peak_rss,
                     container_peak_rss=container_peak_rss,
+                    container_peak_working_set=container_peak_working_set,
                     last_stage=last_stage,
                 )
         if payload is None:
@@ -173,6 +189,7 @@ class OCRWorkerClient:
                 reason="timeout",
                 peak_rss=peak_rss,
                 container_peak_rss=container_peak_rss,
+                container_peak_working_set=container_peak_working_set,
                 last_stage=last_stage,
                 timeout=True,
             )
@@ -196,6 +213,7 @@ class OCRWorkerClient:
             initialized=bool(payload.get("initialized")),
             engine_version=str(payload.get("engine_version") or "unknown"),
             container_peak_rss_mb=container_peak_rss,
+            container_peak_working_set_mb=container_peak_working_set,
         )
         if (
             threshold_exceeded
@@ -212,6 +230,7 @@ class OCRWorkerClient:
         reason: str,
         peak_rss: float,
         container_peak_rss: float,
+        container_peak_working_set: float,
         last_stage: str,
         timeout: bool = False,
         broken_pipe: bool = False,
@@ -223,7 +242,8 @@ class OCRWorkerClient:
         exit_code = process.exitcode if process is not None else None
         _WORKER_LOGGER.error(
             "ocr_worker_failure page=%d reason=%s exit_code=%s timeout=%s broken_pipe=%s "
-            "last_stage=%s peak_rss_mb=%.1f container_peak_rss_mb=%.1f",
+            "last_stage=%s peak_rss_mb=%.1f container_peak_rss_mb=%.1f "
+            "container_peak_working_set_mb=%.1f",
             page_number,
             reason,
             exit_code,
@@ -232,6 +252,7 @@ class OCRWorkerClient:
             last_stage,
             peak_rss,
             container_peak_rss,
+            container_peak_working_set,
         )
         self.close(force=True)
         error = OCRWorkerResourceError(f"OCR 子进程资源异常（reason={reason}）")
@@ -260,23 +281,32 @@ class OCRWorkerClient:
                 process.kill()
                 process.join(timeout=2)
 
-    def _ensure_started(self, page_number: int) -> None:
+    def _ensure_started(self, path: Path, page_number: int) -> None:
         if self._process is not None and self._process.is_alive():
             return
         self.close(force=True)
         parent_before_mb = process_rss_mb()
-        container_before_mb = container_memory_mb()
+        memory_before = container_memory_snapshot()
         release_process_memory()
+        cache_drop_requested = drop_file_cache(path)
         parent_after_mb = process_rss_mb()
-        container_after_mb = container_memory_mb()
-        _WORKER_LOGGER.info(
+        memory_after = container_memory_snapshot()
+        _WORKER_LOGGER.warning(
             "ocr_parent_cleanup page=%d parent_rss_before_mb=%.1f "
-            "parent_rss_after_mb=%.1f container_before_mb=%.1f container_after_mb=%.1f",
+            "parent_rss_after_mb=%.1f container_before_mb=%.1f "
+            "container_after_mb=%.1f working_set_before_mb=%.1f "
+            "working_set_after_mb=%.1f inactive_file_before_mb=%.1f "
+            "inactive_file_after_mb=%.1f file_cache_drop=%s",
             page_number,
             parent_before_mb,
             parent_after_mb,
-            container_before_mb,
-            container_after_mb,
+            memory_before.current_mb,
+            memory_after.current_mb,
+            memory_before.working_set_mb,
+            memory_after.working_set_mb,
+            memory_before.inactive_file_mb,
+            memory_after.inactive_file_mb,
+            str(cache_drop_requested).lower(),
         )
         log_ocr_memory("before_worker_spawn", page_number, False, rss_mb=parent_after_mb)
         context = get_context("spawn")
@@ -292,6 +322,7 @@ class OCRWorkerClient:
         self._connection = parent_connection
         self._process = process
         self._processed_pages = 0
+
 
 
 def _rapidocr_worker(connection: Connection, max_rss_mb: int, threads: int) -> None:

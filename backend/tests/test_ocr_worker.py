@@ -19,7 +19,12 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import app.models  # noqa: F401
-from app.core.memory import process_rss_mb
+from app.core.memory import (
+    ContainerMemorySnapshot,
+    container_memory_snapshot,
+    drop_file_cache,
+    process_rss_mb,
+)
 from app.core.config import Settings, get_settings
 from app.db.base import Base
 from app.db.session import get_db
@@ -60,6 +65,44 @@ def build_text_pdf() -> bytes:
     content = document.tobytes()
     document.close()
     return content
+
+
+class MemoryAccountingTests(unittest.TestCase):
+    def test_cgroup_working_set_excludes_inactive_file_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            current = root / "memory.current"
+            stat = root / "memory.stat"
+            current.write_text(str(500 * 1024 * 1024), encoding="ascii")
+            stat.write_text(
+                f"anon {300 * 1024 * 1024}\ninactive_file {150 * 1024 * 1024}\n",
+                encoding="ascii",
+            )
+            with (
+                patch("app.core.memory._CGROUP_CURRENT_PATHS", (current,)),
+                patch("app.core.memory._CGROUP_STAT_PATHS", (stat,)),
+            ):
+                snapshot = container_memory_snapshot()
+
+        self.assertEqual(snapshot.current_mb, 500.0)
+        self.assertEqual(snapshot.inactive_file_mb, 150.0)
+        self.assertEqual(snapshot.working_set_mb, 350.0)
+
+    def test_drop_file_cache_is_advisory_and_keeps_file_intact(self) -> None:
+        path = Path("private.pdf")
+        dont_need = 4
+        with (
+            patch("app.core.memory.sys.platform", "linux"),
+            patch("app.core.memory.os.open", return_value=17) as open_file,
+            patch("app.core.memory.os.posix_fadvise", create=True) as advise,
+            patch("app.core.memory.os.POSIX_FADV_DONTNEED", dont_need, create=True),
+            patch("app.core.memory.os.close") as close_file,
+        ):
+            self.assertTrue(drop_file_cache(path))
+
+        open_file.assert_called_once_with(path, os.O_RDONLY)
+        advise.assert_called_once_with(17, 0, 0, dont_need)
+        close_file.assert_called_once_with(17)
 
 
 class OCRWorkerIsolationTests(unittest.TestCase):
@@ -137,13 +180,23 @@ class OCRWorkerIsolationTests(unittest.TestCase):
         client = OCRWorkerClient()
         try:
             with (
-                patch("app.document.ocr.release_process_memory", side_effect=lambda: events.append("release")) as release,
+                patch(
+                    "app.document.ocr.release_process_memory",
+                    side_effect=lambda: events.append("release"),
+                ) as release,
                 patch("app.document.ocr.process_rss_mb", side_effect=[210.0, 165.0]),
-                patch("app.document.ocr.container_memory_mb", side_effect=[440.0, 390.0]),
+                patch(
+                    "app.document.ocr.container_memory_snapshot",
+                    side_effect=[
+                        ContainerMemorySnapshot(440.0, 360.0, 80.0),
+                        ContainerMemorySnapshot(390.0, 340.0, 50.0),
+                    ],
+                ),
+                patch("app.document.ocr.drop_file_cache", return_value=True) as drop_cache,
                 patch("app.document.ocr.get_context", return_value=FakeContext()),
-                self.assertLogs("revia.ocr.worker", level="INFO") as captured,
+                self.assertLogs("revia.ocr.worker", level="WARNING") as captured,
             ):
-                client._ensure_started(7)
+                client._ensure_started(Path("private.pdf"), 7)
 
             release.assert_called_once_with()
             self.assertLess(events.index("release"), events.index("start"))
@@ -153,6 +206,12 @@ class OCRWorkerIsolationTests(unittest.TestCase):
             self.assertIn("parent_rss_after_mb=165.0", diagnostic)
             self.assertIn("container_before_mb=440.0", diagnostic)
             self.assertIn("container_after_mb=390.0", diagnostic)
+            self.assertIn("working_set_before_mb=360.0", diagnostic)
+            self.assertIn("working_set_after_mb=340.0", diagnostic)
+            self.assertIn("inactive_file_before_mb=80.0", diagnostic)
+            self.assertIn("file_cache_drop=true", diagnostic)
+            self.assertNotIn("private.pdf", diagnostic)
+            drop_cache.assert_called_once_with(Path("private.pdf"))
         finally:
             client.close(force=True)
 
@@ -213,10 +272,13 @@ class OCRWorkerIsolationTests(unittest.TestCase):
 
         client._process = RunningProcess()
         client._connection = ResultConnection()
-        client._ensure_started = lambda page_number: None
+        client._ensure_started = lambda path, page_number: None
         with (
             patch("app.document.ocr.process_rss_mb", return_value=80.0),
-            patch("app.document.ocr.container_memory_mb", return_value=220.0),
+            patch(
+                "app.document.ocr.container_memory_snapshot",
+                return_value=ContainerMemorySnapshot(220.0, 220.0, 0.0),
+            ),
             patch.object(client, "close") as close,
         ):
             result = client.recognize_page(Path("private.pdf"), 1, 144)
@@ -253,10 +315,13 @@ class OCRWorkerIsolationTests(unittest.TestCase):
 
         client._process = RunningProcess()
         client._connection = WaitingConnection()
-        client._ensure_started = lambda page_number: None
+        client._ensure_started = lambda path, page_number: None
         with (
             patch("app.document.ocr.process_rss_mb", return_value=280.0),
-            patch("app.document.ocr.container_memory_mb", return_value=481.0),
+            patch(
+                "app.document.ocr.container_memory_snapshot",
+                return_value=ContainerMemorySnapshot(500.0, 481.0, 19.0),
+            ),
             patch.object(client, "close") as close,
             self.assertLogs("revia.ocr.worker", level="ERROR") as captured,
         ):
@@ -266,8 +331,69 @@ class OCRWorkerIsolationTests(unittest.TestCase):
         close.assert_called_once_with(force=True)
         diagnostic = "\n".join(captured.output)
         self.assertIn("reason=container_memory_limit", diagnostic)
-        self.assertIn("container_peak_rss_mb=481.0", diagnostic)
+        self.assertIn("container_peak_rss_mb=500.0", diagnostic)
+        self.assertIn("container_peak_working_set_mb=481.0", diagnostic)
         self.assertNotIn("private.pdf", diagnostic)
+
+    def test_reclaimable_file_cache_does_not_trigger_container_limit(self) -> None:
+        client = OCRWorkerClient(
+            max_rss_mb=300,
+            max_pages=10,
+            container_memory_budget_mb=480,
+            threads=1,
+            timeout_seconds=180,
+        )
+
+        class RunningProcess:
+            pid = os.getpid()
+            exitcode = None
+
+            @staticmethod
+            def is_alive() -> bool:
+                return True
+
+        class ResultConnection:
+            @staticmethod
+            def send(message) -> None:
+                return None
+
+            @staticmethod
+            def poll(timeout=None) -> bool:
+                return True
+
+            @staticmethod
+            def recv():
+                return {
+                    "event": "result",
+                    "ok": True,
+                    "page_number": 1,
+                    "text": "page text",
+                    "character_count": 9,
+                    "rss_mb": 180.0,
+                    "baseline_rss_mb": 70.0,
+                    "engine_rss_mb": 160.0,
+                    "render_rss_mb": 170.0,
+                    "initialized": True,
+                    "engine_version": "test",
+                    "retire_after_page": False,
+                }
+
+        client._process = RunningProcess()
+        client._connection = ResultConnection()
+        client._ensure_started = lambda path, page_number: None
+        with (
+            patch("app.document.ocr.process_rss_mb", return_value=80.0),
+            patch(
+                "app.document.ocr.container_memory_snapshot",
+                return_value=ContainerMemorySnapshot(500.0, 350.0, 150.0),
+            ),
+            patch.object(client, "close") as close,
+        ):
+            result = client.recognize_page(Path("private.pdf"), 1, 144)
+
+        self.assertEqual(result.container_peak_rss_mb, 500.0)
+        self.assertEqual(result.container_peak_working_set_mb, 350.0)
+        close.assert_not_called()
 
     def test_real_worker_isolated_memory_stays_below_render_budget(self) -> None:
         self.assertNotIn("rapidocr", sys.modules)
@@ -345,8 +471,15 @@ class OCRWorkerIsolationTests(unittest.TestCase):
 
         client._process = ExitedProcess()
         client._connection = StageThenEOFConnection()
-        client._ensure_started = lambda page_number: None
-        with self.assertLogs("revia.ocr.worker", level="ERROR") as captured:
+        client._ensure_started = lambda path, page_number: None
+        with (
+            patch(
+                "app.document.ocr.container_memory_snapshot",
+                return_value=ContainerMemorySnapshot(200.0, 200.0, 0.0),
+            ),
+            patch("app.document.ocr.process_rss_mb", return_value=100.0),
+            self.assertLogs("revia.ocr.worker", level="ERROR") as captured,
+        ):
             with self.assertRaises(OCRWorkerResourceError):
                 client.recognize_page(Path("private-course.pdf"), 1, 144)
 
@@ -394,8 +527,15 @@ class OCRWorkerIsolationTests(unittest.TestCase):
 
         client._process = RunningProcess()
         client._connection = SilentConnection()
-        client._ensure_started = lambda page_number: None
-        with self.assertLogs("revia.ocr.worker", level="ERROR") as captured:
+        client._ensure_started = lambda path, page_number: None
+        with (
+            patch(
+                "app.document.ocr.container_memory_snapshot",
+                return_value=ContainerMemorySnapshot(200.0, 200.0, 0.0),
+            ),
+            patch("app.document.ocr.process_rss_mb", return_value=100.0),
+            self.assertLogs("revia.ocr.worker", level="ERROR") as captured,
+        ):
             with self.assertRaises(OCRWorkerResourceError):
                 client.recognize_page(Path("private-course.pdf"), 7, 144)
 
