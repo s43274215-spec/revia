@@ -8,7 +8,12 @@ from app.ai.clients.base import AIClient
 from app.ai.prompt_builder import PromptBuilder
 from app.ai.prompt_loader import load_prompt, render_prompt
 from app.ai.schemas import GeneratedItemResult, GeneratedProject, RetrievalQueryRewrite
-from app.ai.validation import AIOutputValidationError, validate_generated_item, validate_generated_project
+from app.ai.validation import (
+    AIOutputValidationError,
+    salvage_generated_item,
+    validate_generated_item,
+    validate_generated_project,
+)
 from app.matching.schemas import CandidateChunk
 
 logger = logging.getLogger("revia.ai.validation")
@@ -94,11 +99,21 @@ class AIService:
                 self._validate_sources(result, request.candidates)
                 logger.info("AI item structure repair succeeded")
             except AIOutputValidationError as second_error:
-                logger.error("AI item structure repair failed: %s", second_error)
-                raise AIOutputValidationError(
-                    "AI output failed schema validation after one structure-repair retry: "
-                    + self._safe_validation_reason(second_error)
-                ) from second_error
+                logger.warning("AI item structure repair failed; preserving readable content: %s", second_error)
+                try:
+                    result = salvage_generated_item(
+                        [repaired_output, raw_output],
+                        fallback_title=request.syllabus_item,
+                        candidates=request.candidates,
+                    )
+                    self._validate_sources(result, request.candidates)
+                    logger.warning("AI item was saved with format warnings: %s", result.format_warnings)
+                except AIOutputValidationError as salvage_error:
+                    logger.error("AI item deterministic salvage failed: %s", salvage_error)
+                    raise AIOutputValidationError(
+                        "AI output failed schema validation and contained no readable content after salvage: "
+                        + self._safe_validation_reason(salvage_error)
+                    ) from second_error
         return result
 
     async def rewrite_retrieval_queries(

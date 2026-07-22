@@ -103,6 +103,8 @@ button:focus-visible,input:focus-visible { outline:2px solid color-mix(in srgb,v
 .partial-generation-summary>span { display:block; margin-bottom:6px; color:#8a7665; font-size:9px; font-weight:700; letter-spacing:.1em; }
 .partial-generation-summary>strong { display:block; color:#514b45; font-family:Georgia,"Songti SC",serif; font-size:14px; font-weight:600; }
 .partial-generation-summary>p { margin:6px 0 0; color:#89817a; font-size:10px; line-height:1.7; }
+.partial-generation-summary.is-warning { border-color:#d7dfd9; border-left-color:var(--accent); background:#f3f7f4; }
+.partial-generation-summary.is-warning>span { color:var(--accent); }
 .chapter-section { scroll-margin-top:26px; margin-bottom:88px; }
 .chapter-number { margin-bottom:9px; color:var(--accent); font-family:Georgia,serif; font-size:10px; letter-spacing:.16em; }
 .reading-document h2 { margin:0 0 46px; padding-bottom:17px; border-bottom:1px solid var(--line); font-size:26px; font-weight:600; }

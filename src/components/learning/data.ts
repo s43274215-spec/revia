@@ -10,6 +10,22 @@ export const versionLabels = Object.fromEntries(
   versionContract.map(({ id, label }) => [id, label]),
 ) as Record<Version, string>;
 
+const leadingTitleNumber = /^(?:\s*(?:第\s*[一二三四五六七八九十百\d]+\s*[章节篇]|[一二三四五六七八九十百\d]+[、.．)）]|[（(][一二三四五六七八九十百\d]+[）)]))+\s*/u;
+
+export function normalizeDisplayTitle(value: string): string {
+  return value
+    .trim()
+    .replace(leadingTitleNumber, "")
+    .replace(/[^\w\u3400-\u9fff]+/g, "")
+    .toLocaleLowerCase("zh-CN");
+}
+
+export function sameDisplayTitle(left: string, right: string): boolean {
+  const normalizedLeft = normalizeDisplayTitle(left);
+  const normalizedRight = normalizeDisplayTitle(right);
+  return Boolean(normalizedLeft && normalizedRight && normalizedLeft === normalizedRight);
+}
+
 export type VersionPoint = { title: string; content: string[] };
 
 export type PointVersions = Record<Version, VersionPoint>;

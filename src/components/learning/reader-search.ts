@@ -10,6 +10,22 @@ export type SearchResult = {
   kind: "资料章节" | "知识点" | "内部标题" | "正文" | "列表项";
 };
 
+const leadingTitleNumber = /^(?:\s*(?:第\s*[一二三四五六七八九十百\d]+\s*[章节篇]|[一二三四五六七八九十百\d]+[、.．)）]|[（(][一二三四五六七八九十百\d]+[）)]))+\s*/u;
+
+function normalizeSearchTitle(value: string): string {
+  return value
+    .trim()
+    .replace(leadingTitleNumber, "")
+    .replace(/[^\w\u3400-\u9fff]+/g, "")
+    .toLocaleLowerCase("zh-CN");
+}
+
+function sameDisplayTitle(left: string, right: string): boolean {
+  const normalizedLeft = normalizeSearchTitle(left);
+  const normalizedRight = normalizeSearchTitle(right);
+  return Boolean(normalizedLeft && normalizedRight && normalizedLeft === normalizedRight);
+}
+
 function excerpt(text: string, query: string): string {
   const normalized = text.toLocaleLowerCase("zh-CN");
   const index = normalized.indexOf(query.toLocaleLowerCase("zh-CN"));
@@ -41,7 +57,9 @@ export function searchProject(
       add({ id: `knowledge:${knowledge.id}`, targetId: `${knowledge.id}-title`, chapter: chapterTitle, knowledgePoint: knowledge.title, kind: "知识点" }, knowledge.title);
       for (const point of knowledge.bulletPoints) {
         const versionPoint = point.versions[version];
-        add({ id: `title:${point.id}`, targetId: `${point.id}-title`, chapter: chapterTitle, knowledgePoint: knowledge.title, kind: "内部标题" }, versionPoint.title);
+        if (!sameDisplayTitle(knowledge.title, versionPoint.title)) {
+          add({ id: `title:${point.id}`, targetId: `${point.id}-title`, chapter: chapterTitle, knowledgePoint: knowledge.title, kind: "内部标题" }, versionPoint.title);
+        }
         if (version === "keywords") {
           versionPoint.content.forEach((text, index) => add({
             id: `body:${point.id}:${version}:${index}`,

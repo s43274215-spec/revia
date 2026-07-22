@@ -221,7 +221,7 @@ class AIValidationRetryTests(unittest.IsolatedAsyncioTestCase):
         client = SequenceClient(["not-json", "still-not-json"])
         with self.assertRaisesRegex(
             AIOutputValidationError,
-            "after one structure-repair retry: AI output did not contain a JSON object",
+            "contained no readable content after salvage",
         ):
             await AIService(client).generate_item(ItemGenerationRequest(
                 project_id=uuid.uuid4(),
@@ -357,7 +357,7 @@ class PromptAndGeneratedItemSchemaTests(unittest.TestCase):
         for kind in ("original", "recitation", "keywords"):
             repeated_parent["bullet_points"][0][kind]["title"] = repeated_title
         normalized_parent = validate_generated_item(json.dumps(repeated_parent, ensure_ascii=False))
-        self.assertEqual(normalized_parent.bullet_points[0].title, "数量")
+        self.assertEqual(normalized_parent.bullet_points[0].title, repeated_title)
 
         flexible_format = json.loads(json.dumps(valid, ensure_ascii=False))
         flexible_format["bullet_points"][0]["original"]["content"] = "原文内容。" * 220
@@ -428,12 +428,15 @@ class PromptAndGeneratedItemSchemaTests(unittest.TestCase):
         self.assertEqual(result.bullet_points[0].source_chunk_ids, [chunk_id])
         self.assertEqual(result.bullet_points[0].source_pages, [16])
 
-    def test_collection_payload_rejects_numbered_children_inside_one_long_content(self) -> None:
+    def test_collection_payload_preserves_numbered_children_inside_one_long_content(self) -> None:
         payload = self.valid_payload(uuid.uuid4())
+        content = "1. 能动性：能够主动劳动。\n2. 可再生性：能够恢复提升。"
         payload["knowledge_point_title"] = "人力资源的特征"
-        payload["bullet_points"][0]["original"]["content"] = "1. 能动性：能够主动劳动。\n2. 可再生性：能够恢复提升。"
-        with self.assertRaisesRegex(AIOutputValidationError, "separate bullet points"):
-            validate_generated_item(json.dumps(payload, ensure_ascii=False))
+        payload["bullet_points"][0]["original"]["content"] = content
+
+        result = validate_generated_item(json.dumps(payload, ensure_ascii=False))
+
+        self.assertEqual(result.bullet_points[0].original.content, content)
 
 
 class KnowledgeHierarchyTests(unittest.TestCase):

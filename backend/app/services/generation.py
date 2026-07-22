@@ -184,6 +184,8 @@ class GenerationWorkflowService:
                     if previous is not None and previous.candidates_payload is not None
                     else None
                 ),
+                failure_type=previous.failure_type if reusable else None,
+                error_message=previous.error_message if reusable else None,
                 started_at=now if reusable else None,
                 completed_at=now if reusable else None,
             ))
@@ -318,8 +320,8 @@ class GenerationWorkflowService:
                     item.status = GenerationItemStatus.SUCCEEDED.value
                     item.result_payload = result.model_dump(mode="json")
                     item.completed_at = datetime.now(UTC)
-                    item.error_message = None
-                    item.failure_type = None
+                    item.error_message = "；".join(result.format_warnings) if result.format_warnings else None
+                    item.failure_type = "format_warning" if result.format_warnings else None
                     self._db.commit()
                 except Exception as exc:
                     self._db.rollback()
@@ -547,10 +549,11 @@ class GenerationWorkflowService:
         items = self._job_items(job.id)
         terminal = [item for item in items if item.status in _TERMINAL_ITEM_STATUSES]
         failures = self._item_failures(items)
+        warnings = self._item_warnings(items)
         job.processed_items = len(terminal)
         job.successful_items = sum(item.status == GenerationItemStatus.SUCCEEDED.value for item in terminal)
         job.failed_items = len(failures)
-        job.item_failures = failures
+        job.item_failures = [*failures, *warnings]
         job.progress = min(95, 20 + int(75 * len(terminal) / max(job.total_items, 1)))
         job.last_activity_at = datetime.now(UTC)
         self._db.commit()
@@ -573,6 +576,7 @@ class GenerationWorkflowService:
         if len(items) != job.total_items or any(item.status not in _TERMINAL_ITEM_STATUSES for item in items):
             raise RuntimeError("generation_finalization_incomplete: not every syllabus item is terminal")
         failures = self._item_failures(items)
+        warnings = self._item_warnings(items)
         succeeded = [item for item in items if item.status == GenerationItemStatus.SUCCEEDED.value]
         if not succeeded:
             self._mark_failed(job, project, "generation_failed: no syllabus item produced valid learning material", failures)
@@ -605,7 +609,7 @@ class GenerationWorkflowService:
         job.processed_items = job.total_items
         job.successful_items = success_count
         job.failed_items = failure_count
-        job.item_failures = failures
+        job.item_failures = [*failures, *warnings]
         job.completed_at = datetime.now(UTC)
         job.last_activity_at = job.completed_at
         if failures:
@@ -726,6 +730,24 @@ class GenerationWorkflowService:
             }
             for item in items
             if item.status == GenerationItemStatus.FAILED.value
+        ]
+
+    @staticmethod
+    def _item_warnings(items: list[GenerationJobItem]) -> list[dict[str, object]]:
+        return [
+            {
+                "syllabus_item": item.syllabus_item,
+                "reason": item.error_message or "部分格式异常，已保留可读内容",
+                "failure_type": "format_warning",
+                "position": item.position,
+                "syllabus_chapter": item.syllabus_chapter,
+                "parent_syllabus_item": item.parent_syllabus_item,
+            }
+            for item in items
+            if (
+                item.status == GenerationItemStatus.SUCCEEDED.value
+                and item.failure_type == "format_warning"
+            )
         ]
 
     @staticmethod

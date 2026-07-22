@@ -28,6 +28,7 @@ test("legacy generation failures are classified from their stored reasons", () =
     unmatched: 1,
     schema_validation: 1,
     generation_error: 0,
+    format_warning: 0,
   });
 });
 

@@ -37,8 +37,20 @@ _COLLECTION_TITLE_PATTERN = re.compile(r"(?:特征|特点|类型|原则|步骤|�
 _ORDERED_ITEM_PATTERN = re.compile(r"(?:^|\n)\s*(?:\d+[.、)）]|[（(][一二三四五六七八九十\d]+[）)])\s*")
 
 
+_LEADING_TITLE_NUMBER_PATTERN = re.compile(
+    r"^\s*(?:(?:第\s*[一二三四五六七八九十百\d]+\s*[章节篇])|"
+    r"(?:[一二三四五六七八九十百\d]+[、.．)）])|"
+    r"(?:[（(][一二三四五六七八九十百\d]+[）)]))\s*"
+)
+
+
+def normalize_title_for_comparison(value: str) -> str:
+    without_number = _LEADING_TITLE_NUMBER_PATTERN.sub("", value.strip())
+    return re.sub(r"[^\w\u4e00-\u9fff]+", "", without_number, flags=re.UNICODE).casefold()
+
+
 def _normalize_title(value: str) -> str:
-    return re.sub(r"[^\w\u4e00-\u9fff]+", "", value, flags=re.UNICODE).casefold()
+    return normalize_title_for_comparison(value)
 
 
 def _validate_meaningful_text(value: str) -> str:
@@ -140,8 +152,8 @@ class GeneratedBulletPayload(BaseModel):
     original: GeneratedVersionPayload
     recitation: GeneratedVersionPayload
     keywords: GeneratedVersionPayload
-    source_chunk_ids: list[uuid.UUID] = Field(min_length=1)
-    source_pages: list[int] = Field(min_length=1)
+    source_chunk_ids: list[uuid.UUID] = Field(default_factory=list)
+    source_pages: list[int] = Field(default_factory=list)
 
     @field_validator("title")
     @classmethod
@@ -195,8 +207,6 @@ class GeneratedBulletPayload(BaseModel):
             raise ValueError(
                 f"keywords content must not exceed the safety limit of {KEYWORDS_MAX_ITEMS} keywords or phrases"
             )
-        if self.original.content.strip() == self.recitation.content.strip():
-            raise ValueError("recitation content must not duplicate original content verbatim")
         return self
 
 
@@ -205,6 +215,7 @@ class GeneratedItemResult(BaseModel):
 
     knowledge_point_title: str = Field(min_length=1, max_length=TITLE_MAX_LENGTH)
     bullet_points: list[GeneratedBulletPayload] = Field(min_length=1)
+    format_warnings: list[str] = Field(default_factory=list)
 
     @field_validator("knowledge_point_title", mode="before")
     @classmethod
@@ -223,18 +234,7 @@ class GeneratedItemResult(BaseModel):
         return _validate_generated_title(value)
 
     @model_validator(mode="after")
-    def titles_form_a_non_repeating_hierarchy(self) -> "GeneratedItemResult":
-        parent = _normalize_title(self.knowledge_point_title)
-        child_titles: list[str] = []
-        for bullet in self.bullet_points:
-            child = _normalize_title(bullet.title)
-            if parent and parent in child:
-                raise ValueError("bullet title must not contain the complete knowledge point title")
-            child_titles.append(child)
-        if len(child_titles) != len(set(child_titles)):
-            raise ValueError("bullet point titles must be unique within a knowledge point")
-        if _COLLECTION_TITLE_PATTERN.search(self.knowledge_point_title) and len(self.bullet_points) == 1:
-            original = self.bullet_points[0].original.content
-            if len(_ORDERED_ITEM_PATTERN.findall(original)) >= 2:
-                raise ValueError("collection items must be returned as separate bullet points")
+    def preserve_non_blocking_format_drift(self) -> "GeneratedItemResult":
+        # Parent/child title overlap, repeated child titles and unsplit collections are
+        # presentation concerns. They must never discard otherwise readable content.
         return self

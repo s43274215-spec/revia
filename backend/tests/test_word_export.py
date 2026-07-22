@@ -255,6 +255,24 @@ class WordExportTests(unittest.TestCase):
             self.assertIn(f"{title}完整正文。", text)
         self.assertIn("宽泛知识点的其他内容。", text)
 
+    def test_duplicate_knowledge_and_bullet_title_is_hidden_without_losing_content(self) -> None:
+        with self.Session() as db:
+            project = db.get(Project, self.project_id)
+            knowledge = project.chapters[0].knowledge_points[0]
+            for version in knowledge.bullet_points[0].versions:
+                version.title = "第 1 节：财政政策工具"
+            db.commit()
+            payload, _ = WordExportService(db).export(
+                self.workspace_id,
+                self.project_id,
+                ContentVersionKind.ORIGINAL,
+            )
+
+        document, text = self._text(payload)
+        self.assertIn("原文版本正文", text)
+        self.assertEqual(sum(paragraph.text == "财政政策工具" for paragraph in document.paragraphs), 1)
+        self.assertNotIn("第 1 节：财政政策工具", text)
+
     def test_export_is_workspace_scoped(self) -> None:
         with self.Session() as db:
             with self.assertRaises(WordExportNotFoundError):

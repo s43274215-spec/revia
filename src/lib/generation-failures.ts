@@ -1,8 +1,9 @@
 import type { GenerationItemFailure, GenerationJob } from "./revia-api";
 
-export type GenerationFailureKind = "unmatched" | "schema_validation" | "generation_error";
+export type GenerationFailureKind = "unmatched" | "schema_validation" | "generation_error" | "format_warning";
 
 export function generationFailureKind(failure: GenerationItemFailure): GenerationFailureKind {
+  if (failure.failure_type === "format_warning") return "format_warning";
   if (failure.failure_type === "unmatched" || failure.reason.toLowerCase().includes("unmatched")) {
     return "unmatched";
   }
@@ -14,12 +15,16 @@ export function generationFailureKind(failure: GenerationItemFailure): Generatio
 
 export function generationFailureLabel(failure: GenerationItemFailure): string {
   const kind = generationFailureKind(failure);
+  if (kind === "format_warning") return "内容已保留，建议检查";
   if (kind === "unmatched") return "资料依据不足";
   if (kind === "schema_validation") return "生成格式未通过检查";
   return "生成未完成";
 }
 
 export function generationFailureReason(failure: GenerationItemFailure): string {
+  if (generationFailureKind(failure) === "format_warning") {
+    return failure.reason || "部分内容未完全符合标准格式，已保留可读结果，建议检查。";
+  }
   const reason = failure.reason.toLowerCase();
   if (generationFailureKind(failure) === "unmatched") {
     return "课程资料中没有找到达到相关性要求的内容。";
@@ -48,9 +53,10 @@ export function generationFailureCounts(failures: GenerationItemFailure[]) {
   return failures.reduce((counts, failure) => {
     counts[generationFailureKind(failure)] += 1;
     return counts;
-  }, { unmatched: 0, schema_validation: 0, generation_error: 0 });
+  }, { unmatched: 0, schema_validation: 0, generation_error: 0, format_warning: 0 });
 }
 
 export function successfulGenerationCount(job: GenerationJob): number {
-  return job.successful_items ?? Math.max(0, job.total_items - job.item_failures.length);
+  const blockingFailures = job.item_failures.filter((failure) => generationFailureKind(failure) !== "format_warning");
+  return job.successful_items ?? Math.max(0, job.total_items - blockingFailures.length);
 }

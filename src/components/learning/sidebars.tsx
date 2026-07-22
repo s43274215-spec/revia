@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Chapter, Project } from "./data";
 import { Icon } from "./icons";
 import { SettingsTrigger } from "@/components/settings/settings-trigger";
-import { generationFailureLabel, generationFailureReason } from "@/lib/generation-failures";
+import { generationFailureKind, generationFailureLabel, generationFailureReason } from "@/lib/generation-failures";
 import type { GenerationJob } from "@/lib/revia-api";
 
 export function ProjectSidebar({ projects, activeProjectId, onSelect }: { projects: Project[]; activeProjectId: string | null; onSelect: (id: string) => void }) {
@@ -31,7 +31,9 @@ export function ProjectSidebar({ projects, activeProjectId, onSelect }: { projec
 export function OutlineSidebar({ project, progress, activeId, onNavigate, partialJob }: { project: Project; progress: number; activeId: string | null; onNavigate: (id: string) => void; partialJob: GenerationJob | null }) {
   const [expandedFailure, setExpandedFailure] = useState<number | null>(null);
   const itemRefs = useRef(new Map<string, HTMLButtonElement>());
-  const failures = partialJob?.item_failures ?? [];
+  const failures = (partialJob?.item_failures ?? []).filter(
+    (failure) => generationFailureKind(failure) !== "format_warning",
+  );
 
   useEffect(() => {
     if (activeId) itemRefs.current.get(activeId)?.scrollIntoView({ block: "nearest" });

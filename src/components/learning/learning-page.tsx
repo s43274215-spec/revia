@@ -85,7 +85,7 @@ export function LearningPage({ projectId }: { projectId: string }) {
     if (!sidebarProjects.some((item) => item.id === projectId)) sidebarProjects.unshift(current);
     setHistory({ past: [], present: sidebarProjects, future: [] });
     setActiveProjectId(projectId);
-    setPartialGenerationJob(latestPublishedJob?.status === "partial_failed" ? latestPublishedJob : null);
+    setPartialGenerationJob(latestPublishedJob?.item_failures.length ? latestPublishedJob : null);
   }, [projectId]);
 
   useEffect(() => {

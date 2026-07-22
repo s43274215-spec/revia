@@ -16,6 +16,7 @@ from docx.shared import Cm, Pt, RGBColor
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from app.ai.schemas import normalize_title_for_comparison
 from app.models.content import BulletPoint, Chapter, KnowledgePoint
 from app.models.enums import ContentVersionKind
 from app.models.project import GenerationJob, Project
@@ -154,7 +155,11 @@ class WordExportService:
             .order_by(GenerationJob.created_at.desc())
             .limit(1)
         )
-        return list(job.item_failures or []) if job is not None else []
+        return [
+            item
+            for item in (job.item_failures or [])
+            if item.get("failure_type") != "format_warning"
+        ] if job is not None else []
 
     @staticmethod
     def _stable_chapter_title(title: str | None) -> str | None:
@@ -303,13 +308,22 @@ class WordExportService:
     ) -> None:
         document.add_paragraph(knowledge_point.title, style=STYLE_KNOWLEDGE)
         for bullet in sorted(knowledge_point.bullet_points, key=lambda item: item.position):
-            self._add_bullet_version(document, bullet, kind)
+            self._add_bullet_version(document, bullet, kind, knowledge_point.title)
 
-    def _add_bullet_version(self, document: WordDocument, bullet: BulletPointRead, kind: ContentVersionKind) -> None:
+    def _add_bullet_version(
+        self,
+        document: WordDocument,
+        bullet: BulletPointRead,
+        kind: ContentVersionKind,
+        knowledge_title: str,
+    ) -> None:
         version = next((item for item in bullet.versions if item.kind == kind), None)
         if version is None:
             return
-        document.add_paragraph(version.title, style=STYLE_INTERNAL)
+        internal_title = normalize_title_for_comparison(version.title)
+        knowledge_key = normalize_title_for_comparison(knowledge_title)
+        if internal_title and internal_title != knowledge_key:
+            document.add_paragraph(version.title, style=STYLE_INTERNAL)
         self._add_content(document, version.content)
 
     @staticmethod
