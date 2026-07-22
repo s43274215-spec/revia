@@ -87,6 +87,48 @@ class AIOutputSalvageTests(unittest.TestCase):
         self.assertEqual(len(result.bullet_points), 1)
         self.assertEqual(result.bullet_points[0].title, "基本流程")
 
+    def test_salvage_recovers_explicit_content_from_invalid_json(self) -> None:
+        raw = """
+```json
+{
+  "knowledge_point_title": "胜任素质模型",
+  "bullet_points": [{
+    "title": "胜任素质模型",
+    "original": {
+      "title": "胜任素质模型",
+      "content": "胜任素质模型用于描述产生优秀绩效所需要的知识、技能和行为特征。"
+    },
+    "recitation": {
+      "title": "胜任素质模型",
+      "content": "胜任素质模型概括优秀绩效所需的知识、技能与行为特征。"
+    },
+    "keywords": {
+      "title": "胜任素质模型",
+      "content": "知识、技能、行为特征"
+    }
+```
+"""
+
+        result = salvage_generated_item(
+            [raw],
+            fallback_title="胜任素质模型",
+            candidates=self.candidates,
+        )
+
+        bullet = result.bullet_points[0]
+        self.assertIn("优秀绩效", bullet.original.content)
+        self.assertIn("知识", bullet.keywords.content)
+        self.assertEqual(bullet.source_chunk_ids, [])
+        self.assertEqual(bullet.source_pages, [])
+        self.assertIn("AI 返回结构损坏，已从可读文本中恢复内容", result.format_warnings)
+        self.assertIn("来源未完整验证", result.format_warnings)
+
+    def test_invalid_json_without_explicit_readable_content_still_fails(self) -> None:
+        raw = '{"knowledge_point_title":"绩效管理","bullet_points":[{"title":"损坏"'
+
+        with self.assertRaises(AIOutputValidationError):
+            salvage_generated_item([raw], fallback_title="绩效管理", candidates=self.candidates)
+
     def test_salvage_still_fails_when_nothing_is_readable(self) -> None:
         raw = json.dumps({
             "knowledge_point_title": "绩效管理",

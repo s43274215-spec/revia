@@ -20,6 +20,11 @@ const longTitleSchema = {
   failure_type: "schema_validation",
   reason: "AI output failed schema validation after one structure-repair retry: AI output does not match the three-version item schema: bullet_points.3.title: String should have at most 25 characters; bullet_points.3.original.title: String should have at most 25 characters",
 };
+const unreadableSchema = {
+  syllabus_item: "胜任素质模型",
+  failure_type: "schema_validation",
+  reason: "AI output failed schema validation and contained no readable content after salvage: AI output contained no readable learning content after deterministic salvage",
+};
 
 test("legacy generation failures are classified from their stored reasons", () => {
   assert.equal(generationFailureKind(unmatched), "unmatched");
@@ -38,6 +43,10 @@ test("internal validation errors become readable failure reasons", () => {
   assert.equal(
     generationFailureReason(longTitleSchema),
     "第 4 个小标题超过旧的 25 字排版建议；修复后不会再因此丢弃有效内容。",
+  );
+  assert.equal(
+    generationFailureReason(unreadableSchema),
+    "AI 两次返回的结构均损坏，且未能提取到可读正文。",
   );
 });
 

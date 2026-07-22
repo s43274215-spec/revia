@@ -39,6 +39,12 @@ export function generationFailureReason(failure: GenerationItemFailure): string 
   if (longBulletTitle) {
     return `第 ${Number(longBulletTitle[1]) + 1} 个小标题超过旧的 25 字排版建议；修复后不会再因此丢弃有效内容。`;
   }
+  if (
+    reason.includes("no readable content after salvage") ||
+    reason.includes("no readable learning content")
+  ) {
+    return "AI 两次返回的结构均损坏，且未能提取到可读正文。";
+  }
   if (generationFailureKind(failure) === "schema_validation") {
     const details = failure.reason.match(/three-version item schema:\s*(.+)$/i)?.[1]?.trim();
     if (details) {

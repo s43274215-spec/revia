@@ -213,6 +213,143 @@ def _version_content(bullet: dict[str, object], key: str) -> str:
     return _readable_text(value, keywords=key == "keywords")
 
 
+_JSON_LIKE_KEY = re.compile(
+    r"(?i)(?:[\"'](?P<quoted>[^\"']+)[\"']|(?P<plain>[A-Za-z_][A-Za-z0-9_]*))\s*:\s*"
+)
+
+
+def _decode_json_like_string(value: str) -> str:
+    try:
+        decoded = json.loads(f'"{value}"')
+        return decoded if isinstance(decoded, str) else value
+    except json.JSONDecodeError:
+        return (
+            value
+            .replace(r"\n", "\n")
+            .replace(r"\r", "\n")
+            .replace(r"\t", " ")
+            .replace(r'\"', '"')
+            .replace(r"\'", "'")
+            .replace(r"\\", "\\")
+        )
+
+
+def _json_like_value_after(text: str, start: int) -> str:
+    index = start
+    while index < len(text) and text[index].isspace():
+        index += 1
+    if index >= len(text):
+        return ""
+
+    quote = text[index]
+    if quote in {'"', "'"}:
+        index += 1
+        buffer: list[str] = []
+        escaped = False
+        while index < len(text):
+            char = text[index]
+            if escaped:
+                buffer.extend(("\\", char))
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                break
+            else:
+                buffer.append(char)
+            index += 1
+        return _decode_json_like_string("".join(buffer))
+
+    if text[index] == "[":
+        end = text.find("]", index + 1)
+        segment = text[index + 1 : end if end >= 0 else len(text)]
+        items = [
+            _decode_json_like_string(match.group("value"))
+            for match in re.finditer(
+                r"(?P<quote>[\"'])(?P<value>.*?)(?<!\\)(?P=quote)",
+                segment,
+                flags=re.DOTALL,
+            )
+        ]
+        return "、".join(item.strip() for item in items if item.strip())
+
+    end = index
+    while end < len(text) and text[end] not in ",}\r\n":
+        end += 1
+    return text[index:end].strip()
+
+
+def _json_like_values(text: str, key: str) -> list[str]:
+    values: list[str] = []
+    for match in _JSON_LIKE_KEY.finditer(text):
+        found_key = match.group("quoted") or match.group("plain") or ""
+        if found_key.casefold() != key.casefold():
+            continue
+        value = _json_like_value_after(text, match.end())
+        if value:
+            values.append(value)
+    return values
+
+
+def _recover_broken_json_payload(raw_output: str, *, fallback_title: str) -> dict[str, object] | None:
+    """Recover only explicit version content strings from malformed JSON-like output.
+
+    The fallback never treats JSON keys or arbitrary surrounding prose as learning
+    content. Missing versions are completed later by the normal deterministic
+    salvage path, and source references remain empty because their association
+    cannot be verified after structural corruption.
+    """
+    version_matches = list(re.finditer(
+        r"(?i)(?:[\"'](?P<quoted>original|recitation|keywords)[\"']|"
+        r"(?P<plain>original|recitation|keywords))\s*:\s*",
+        raw_output,
+    ))
+    recovered: dict[str, list[str]] = {
+        "original": [],
+        "recitation": [],
+        "keywords": [],
+    }
+
+    for index, match in enumerate(version_matches):
+        version = (match.group("quoted") or match.group("plain") or "").casefold()
+        segment_end = (
+            version_matches[index + 1].start()
+            if index + 1 < len(version_matches)
+            else len(raw_output)
+        )
+        segment = raw_output[match.end() : segment_end]
+        values = _json_like_values(segment, "content")
+        if not values:
+            continue
+        text = _readable_text(values[0], keywords=version == "keywords")
+        if text:
+            recovered[version].append(text)
+
+    count = max((len(values) for values in recovered.values()), default=0)
+    bullets: list[dict[str, object]] = []
+    for index in range(count):
+        original = recovered["original"][index] if index < len(recovered["original"]) else ""
+        recitation = recovered["recitation"][index] if index < len(recovered["recitation"]) else ""
+        keywords = recovered["keywords"][index] if index < len(recovered["keywords"]) else ""
+        if not (original or recitation or keywords):
+            continue
+        bullets.append({
+            "title": fallback_title if count == 1 else f"要点 {index + 1}",
+            "original": original,
+            "recitation": recitation,
+            "keywords": keywords,
+            "source_chunk_ids": [],
+            "source_pages": [],
+        })
+
+    if not bullets:
+        return None
+    return {
+        "knowledge_point_title": fallback_title,
+        "bullet_points": bullets,
+    }
+
+
 def _collect_format_warnings(result: GeneratedItemResult) -> list[str]:
     warnings = list(result.format_warnings)
     parent = normalize_title_for_comparison(result.knowledge_point_title)
@@ -246,6 +383,7 @@ def salvage_generated_item(
     last_error: Exception | None = None
 
     for raw_output in raw_outputs:
+        recovered_from_broken_json = False
         try:
             normalized = normalize_generated_item_payload(
                 extract_json(raw_output),
@@ -253,7 +391,13 @@ def salvage_generated_item(
             )
         except AIOutputValidationError as exc:
             last_error = exc
-            continue
+            normalized = _recover_broken_json_payload(
+                raw_output,
+                fallback_title=fallback_title,
+            )
+            if normalized is None:
+                continue
+            recovered_from_broken_json = True
         if not isinstance(normalized, dict):
             continue
 
@@ -269,6 +413,8 @@ def salvage_generated_item(
             raw_bullets = []
 
         warnings = ["部分格式异常，已保留可读内容"]
+        if recovered_from_broken_json:
+            warnings.append("AI 返回结构损坏，已从可读文本中恢复内容")
         salvaged_bullets: list[dict[str, object]] = []
         for index, value in enumerate(raw_bullets):
             if not isinstance(value, dict):
